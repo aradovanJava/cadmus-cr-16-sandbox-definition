@@ -35,7 +35,7 @@ cr16_lab_hosts:
 # ~/vulnbank on MOB1 (the path the CR2-CR4 guides use). Pin a full commit SHA
 # for a course delivery.
 cr16_app_repo: https://github.com/aradovanJava/cadmus-vulnbank-mobile-cr.git
-cr16_app_ref: 8ea2e78d5e325a79f063dcca2ed80233b73193d7
+cr16_app_ref: 1091deafbc4a5cea612859272cfadb29073dddee
 cr16_app_dir: "{{ cr16_home }}/vulnbank"
 
 # Mock backend (vulnbank.local / support.vulnbank.local, port 80 on MOB1).
