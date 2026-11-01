@@ -23,7 +23,7 @@ if [ "${tests:-0}" -gt 0 ] && [ "${fails:-1}" = 0 ]; then pass "tests: ${tests} 
 
 # --- emulator, install, launch ----------------------------------------------
 [ "$(adb shell getprop sys.boot_completed | tr -d '\r')" = 1 ] && pass "emulator: $ANDROID_SERIAL booted" || fail "emulator: not booted"
-r=$(adb install -r "$APK" 2>&1 | tail -n 1)
+r=$(timeout -k 10 300 adb install -r "$APK" 2>&1 | tail -n 1)
 [ "$r" = Success ] && pass "install: $r" || fail "install: $r"
 adb shell monkey -p $PKG -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1; sleep 4
 pid=$(adb shell pidof $PKG | tr -d '\r')
@@ -38,7 +38,7 @@ echo "$res" | grep -q '{{ cr16_ip_mob1 }}' && pass "emulator resolves vulnbank.l
 # --- ZAP: the CR1 A2 path (proxy on the emulator, use the app by hand) --------
 curl -s "$ZAP/JSON/core/action/newSession/?overwrite=true" >/dev/null
 adb shell settings put global http_proxy zap.sandbox.local:{{ cr16_zap_port }}
-python3 /opt/cadmus/selftest/drive_ui.py | sed 's/^/      /'
+timeout -k 10 300 python3 /opt/cadmus/selftest/drive_ui.py | sed 's/^/      /'
 sleep 5
 urls=$(curl -s "$ZAP/JSON/core/view/urls/")
 echo "$urls" | grep -q '/api/v1/login' && pass "zap: history has the login request" || fail "zap: no /login in history"
@@ -74,7 +74,7 @@ curl -s -u $A -X POST "$SQ/api/user_tokens/revoke" --data-urlencode name=cr16-se
 TOK=$(curl -s -u $A -X POST "$SQ/api/user_tokens/generate" --data-urlencode name=cr16-selftest \
       --data-urlencode type=GLOBAL_ANALYSIS_TOKEN | jq -r '.token // empty')
 if [ -n "$TOK" ]; then
-  timeout 1800 ./gradlew -q sonar -Dsonar.projectKey=cadmus-vulnbank -Dsonar.host.url=$SQ -Dsonar.token=$TOK \
+  timeout -k 30 1800 ./gradlew -q sonar -Dsonar.projectKey=cadmus-vulnbank -Dsonar.host.url=$SQ -Dsonar.token=$TOK \
     > /tmp/cr16-sonar.log 2>&1
   rc=$?
   st=''
@@ -96,21 +96,21 @@ v=$(curl -s -u $A "$SQ/api/authentication/validate" | jq -r .valid)
 rm -f /tmp/cr16-sonar.log
 
 # --- CR3 tasks ------------------------------------------------------------------
-if timeout 1200 ./gradlew -q analyzeDependencies > /tmp/cr16-dagp.log 2>&1; then
+if timeout -k 30 1200 ./gradlew -q analyzeDependencies > /tmp/cr16-dagp.log 2>&1; then
   pass "analyzeDependencies: $(grep -ciE "^\s*implementation\(?'" /tmp/cr16-dagp.log) advice line(s), e.g. $(grep -m1 -iE "jackson|okhttp|commons|gson|glide|slf4j|constraint" /tmp/cr16-dagp.log | sed 's/^ *//' | cut -c1-90)"
 else
   fail "analyzeDependencies: $(grep -m1 -A3 'What went wrong' /tmp/cr16-dagp.log | tr '\n' ' ' | cut -c1-300)"
 fi
-if timeout 900 ./gradlew -q cyclonedxBom > /tmp/cr16-bom.log 2>&1 && [ -s build/reports/bom.json ]; then
+if timeout -k 30 900 ./gradlew -q cyclonedxBom > /tmp/cr16-bom.log 2>&1 && [ -s build/reports/bom.json ]; then
   pass "cyclonedxBom: build/reports/bom.json, $(jq '.components | length' build/reports/bom.json) components, spec $(jq -r .specVersion build/reports/bom.json)"
 else
   fail "cyclonedxBom: $(grep -m1 -A3 'What went wrong' /tmp/cr16-bom.log | tr '\n' ' ' | cut -c1-300)"
 fi
-./gradlew -q help --task dependencyCheckAnalyze >/dev/null 2>&1 && pass "dependencyCheckAnalyze: task available" || fail "dependencyCheckAnalyze: task missing"
+timeout -k 30 600 ./gradlew -q help --task dependencyCheckAnalyze >/dev/null 2>&1 && pass "dependencyCheckAnalyze: task available" || fail "dependencyCheckAnalyze: task missing"
 rm -f /tmp/cr16-dagp.log /tmp/cr16-bom.log
 
 # --- CR4 harness against the unmodified build: every attack must still work ---
-python3 /opt/cadmus/exploits/run_scenarios.py --json > /tmp/cr16-ex.json 2>/tmp/cr16-ex.err
+timeout -k 30 1800 python3 /opt/cadmus/exploits/run_scenarios.py --json > /tmp/cr16-ex.json 2>/tmp/cr16-ex.err
 ex=$(jq -r '[.results[] | select(.refused == false)] | length' /tmp/cr16-ex.json 2>/dev/null)
 jq -r '.results[] | "      \(.id) \(if .refused then "REFUSED" else "EXPLOITED" end): \(.detail)"' /tmp/cr16-ex.json 2>/dev/null
 [ "$ex" = 6 ] && pass "run_scenarios baseline: 6/6 attacks succeed on the vulnerable build" \
@@ -120,7 +120,7 @@ rm -f /tmp/cr16-ex.json /tmp/cr16-ex.err
 # --- validators run (no traceback) --------------------------------------------
 for v in "cr1_validate.py --level A1 --session selftest" "cr2_validate.py --session selftest --checkpoint CP1 --no-build" \
          "cr3_validate.py --session selftest --level D3" "cr4_validate.py --session selftest --level E1"; do
-  out=$(timeout 900 python3 /opt/cadmus/$v 2>&1); rc=$?
+  out=$(timeout -k 30 900 python3 /opt/cadmus/$v 2>&1); rc=$?
   if echo "$out" | grep -q Traceback; then fail "validator ${v%% *}: traceback"; else pass "validator ${v%% *}: runs (exit $rc, expected non-zero on an empty session)"; fi
 done
 
@@ -128,7 +128,7 @@ done
 adb uninstall $PKG >/dev/null 2>&1
 adb shell rm -f /sdcard/cr16-ui.xml
 adb logcat -c
-./gradlew -q clean >/dev/null 2>&1
+timeout -k 30 600 ./gradlew -q clean >/dev/null 2>&1; ./gradlew --stop >/dev/null 2>&1
 n=$(git status --porcelain | wc -l)
 [ "$n" = 0 ] && pass "clean-up: app uninstalled, project tree clean" || fail "clean-up: $n changed path(s) in ~/vulnbank"
 echo "self-test: $F failure(s)"

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# CADMUS-CR-16 · MOB1 · first build of the project (provisioning only)
+#
+# Runs as the trainee in {{ cr16_app_dir }}. Every Gradle step is bounded
+# (timeout -k: TERM, then KILL - a TERMed Gradle client can wait forever for a
+# stuck build), logged to {{ cr16_home }}/.cache/cadmus-build/<step>.log, and
+# reported with its duration and the machine load, so a slow or stuck step is
+# visible in the allocation log.
+set -u
+cd {{ cr16_app_dir }} || exit 1
+LOG={{ cr16_home }}/.cache/cadmus-build
+mkdir -p "$LOG"
+rc_all=0
+step() {           # step <name> <seconds> <gradle args...>
+  local name=$1 limit=$2; shift 2
+  local t0=$(date +%s)
+  timeout -k 30 "$limit" ./gradlew --console=plain "$@" > "$LOG/$name.log" 2>&1
+  local rc=$?
+  local dt=$(( $(date +%s) - t0 ))
+  local mem=$(free -m | awk '/^Mem:/{print $3"/"$2" MB used"} /^Swap:/{print "swap "$3" MB"}' | paste -sd' ')
+  if [ $rc = 0 ]; then
+    echo "$name: OK in ${dt}s (load $(cut -d' ' -f1-3 /proc/loadavg), $mem)"
+  else
+    [ $rc = 124 ] || [ $rc = 137 ] && echo "$name: TIMEOUT after ${dt}s (load $(cut -d' ' -f1-3 /proc/loadavg), $mem)" \
+                                  || echo "$name: FAILED rc=$rc after ${dt}s"
+    grep -m1 -A10 'What went wrong' "$LOG/$name.log" | sed 's/^/    /'
+    echo "    last lines of $LOG/$name.log:"
+    tail -n 25 "$LOG/$name.log" | sed 's/^/    /'
+    pkill -u "$(id -u)" -f 'GradleDaemon|GradleWorkerMain' 2>/dev/null
+    rc_all=1
+  fi
+  return $rc
+}
+
+step wrapper   900 --version || exit 1
+step configure 1200 help
+step assemble  2400 assembleRelease || exit 1
+step tests     1800 test
+./gradlew --stop >/dev/null 2>&1
+exit $rc_all

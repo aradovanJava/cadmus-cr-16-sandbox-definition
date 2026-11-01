@@ -478,15 +478,19 @@
         - cadmus-emulator.service
         - cadmus-nvd-warmup.service
 
-    - name: Start the adb server and the emulator (it boots while the rest is installed)
+    # The emulator is started after the first Gradle build: both need the four
+    # cores and most of the RAM.
+    - name: Start the adb server (the emulator follows after the first build)
       ansible.builtin.systemd:
-        name: "{{ item }}"
+        name: cadmus-adb.service
         state: started
         enabled: true
         daemon_reload: true
-      loop:
-        - cadmus-adb.service
-        - cadmus-emulator.service
+
+    - name: Enable the emulator at boot
+      ansible.builtin.systemd:
+        name: cadmus-emulator.service
+        enabled: true
 
     # --- /opt/cadmus: validators, CR4 pack, emulator hosts, self-test helpers --------
     - name: /opt/cadmus folders
@@ -615,20 +619,19 @@
       until: cr16_clone is succeeded
       changed_when: "'cloned' in cr16_clone.stdout"
 
-    - name: Build the release APK and run the smoke tests (first build downloads Gradle and every dependency)
-      ansible.builtin.shell: |
-        cd {{ cr16_app_dir }}
-        timeout 2400 ./gradlew assembleRelease > /tmp/cr16-build.log 2>&1
-        rc=$?
-        if [ $rc = 0 ]; then echo "assembleRelease: OK"; else echo "assembleRelease: FAILED ($rc)"; grep -m1 -A8 'What went wrong' /tmp/cr16-build.log; fi
-        timeout 1800 ./gradlew test > /tmp/cr16-test.log 2>&1
-        rt=$?
-        if [ $rt = 0 ]; then echo "test: OK"; else echo "test: FAILED ($rt)"; grep -m1 -A8 'What went wrong' /tmp/cr16-test.log; grep -m3 -B1 -A3 'FAILED$' /tmp/cr16-test.log; fi
-        exit $rc
-      args:
-        executable: /bin/bash
+    - name: Build script (bounded, timed, logged steps)
+      ansible.builtin.template:
+        src: mob1-build.sh.j2
+        dest: /opt/cadmus/selftest/build.sh
+        mode: "0755"
+
+    # async bounds the whole task even if a process ignores its timeout.
+    - name: First build - Gradle wrapper, configuration, assembleRelease, smoke tests (timings in the log)
+      ansible.builtin.command: /opt/cadmus/selftest/build.sh
       become_user: "{{ cr16_trainee_user }}"
       environment: "{{ cr16_as_user_env }}"
+      async: 7500
+      poll: 30
       register: cr16_build
       changed_when: true
       failed_when: false
@@ -647,6 +650,11 @@
       failed_when: false
 
     # --- emulator ready -----------------------------------------------------------------
+    - name: Start the emulator
+      ansible.builtin.systemd:
+        name: cadmus-emulator.service
+        state: started
+
     - name: Emulator - wait for boot, lab names in /system/etc/hosts, device settings
       ansible.builtin.command: /opt/cadmus/selftest/device-setup.sh
       become_user: "{{ cr16_trainee_user }}"
@@ -704,7 +712,7 @@
           - "SDK: {{ cr16_sdk.stdout_lines | default([]) | join(' | ') }}"
           - "MobSF image: {{ cr16_mobsf_pull.stdout | trim }} | backend base: {{ cr16_py_base.stdout | trim }} | Docker MTU {{ cr16_docker_mtu }}"
           - "Project: {{ cr16_clone.stdout | trim }}"
-          - "BUILD: {{ cr16_build.stdout_lines | default([]) | join(' | ') }}"
+          - "BUILD: {{ cr16_build.stdout_lines | default([]) | join(' | ') }}{{ (' | ' ~ cr16_build.msg) if cr16_build.msg is defined and cr16_build.rc is not defined else '' }}"
           - "APK: {{ cr16_apk.stdout | default('') | trim }}{{ cr16_apk.stderr | default('') }}"
           - "EMULATOR: {{ cr16_device.stdout_lines | default([]) | join(' | ') }}{{ ' | ' ~ cr16_device.stderr if cr16_device.stderr | default('') else '' }}"
 
@@ -723,13 +731,15 @@
       become_user: "{{ cr16_trainee_user }}"
       environment:
         HOME: "{{ cr16_home }}"
+      async: 9000
+      poll: 30
       register: cr16_selftest
       changed_when: false
       failed_when: false
       when: cr16_self_test
 
     - name: Stop the Gradle daemons the provisioning started
-      ansible.builtin.shell: "cd {{ cr16_app_dir }} && ./gradlew --stop >/dev/null 2>&1; true"
+      ansible.builtin.shell: "cd {{ cr16_app_dir }} && timeout -k 10 120 ./gradlew --stop >/dev/null 2>&1; pkill -u {{ cr16_trainee_user }} -f GradleDaemon; true"
       become_user: "{{ cr16_trainee_user }}"
       changed_when: false
 
@@ -743,7 +753,7 @@
 
     - name: SELF-TEST (MOB1)
       ansible.builtin.debug:
-        msg: "{{ ['SELF-TEST mob1: ' ~ ('skipped' if not cr16_self_test else ('PASS' if cr16_selftest.rc == 0 else 'FAIL'))] + (cr16_selftest.stdout_lines | default([])) }}"
+        msg: "{{ ['SELF-TEST mob1: ' ~ ('skipped' if not cr16_self_test else ('PASS' if (cr16_selftest.rc | default(1)) == 0 else 'FAIL'))] + (cr16_selftest.stdout_lines | default([])) }}"
 
 # =============================================================================
 #  SC1 (VM1) - Windows 11 workstation
