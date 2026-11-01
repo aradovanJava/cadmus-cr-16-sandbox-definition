@@ -405,7 +405,10 @@ def behavioural_exploit_test():
 
     combined = (out + err)
     # Refused at the platform boundary -- the component is no longer reachable.
-    if re.search(r"Permission Denial|does not exist|not exported|SecurityException", combined, re.I):
+    # "unable to resolve Intent": the intent filter is gone, nothing outside the
+    # app can address the action any more (revision 2 - a correct fix failed here).
+    if re.search(r"Permission Denial|does not exist|not exported|SecurityException|unable to resolve",
+                 combined, re.I):
         return True, ""
 
     # It started. Did it actually submit anything?
