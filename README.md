@@ -111,11 +111,24 @@ returns `adbd` to an unprivileged shell, exactly what the CR4 scenarios assume.
    follow a branch).
 2. **Sandboxes → Pool → Create** from that definition; size = number of trainees.
 3. **Allocate.** MOB1 (SDK download, first Gradle build, emulator boot) and SC1 dominate:
-   count on 75–100 minutes for a fresh allocation.
+   count on 60–75 minutes for a fresh allocation (MOB1 about 25, SC1 about 35).
 4. Link the pool to the training instance built from the CR-16 training definition.
 
 ## Notes for instructors
 
+- **Tested end to end on 1 Nov 2026:** allocation 1630 (commit `fb967b1`, sandbox
+  definition #70, pool #105) finished all three stages with `failed=0` on sc1, mob1,
+  sq1 and owz1; every self-test passed - build and smoke tests, emulator (Android 14,
+  boot ~45 s), backend from MOB1 and the emulator, the CR1 A2 ZAP path (login and
+  transfer in the history), MobSF key + scan, `./gradlew sonar` (25 Security Hotspots),
+  `analyzeDependencies`, `cyclonedxBom` (59 components), the CR4 harness against the
+  unmodified build (EX-01 to EX-06 all exploited), the validators, and on SC1 adb through
+  MOB1's server, SSH key login and the tool URLs. Pool #105 serves training instance #49.
+- Earlier test allocations found what is now fixed: Docker MTU on the OpenStack network
+  (1442), a Gradle client that ignored `timeout` (build steps are now bounded and logged
+  in `~/.cache/cadmus-build`), the SonarQube mode switch (v2 API), the SBOM's project
+  coordinate, Dependency Analysis on `:app`, EX-03's deep link, colour codes in the
+  backend log.
 - For a course delivery pin `cr16_app_ref` (and keep `cr16_backend_ref`) to full SHAs in
   `provisioning/group_vars/all.yml`, then create the definition from that commit.
 - `dependencyCheckAnalyze` needs the NVD data. The sandbox downloads it in the background
