@@ -96,8 +96,10 @@ v=$(curl -s -u $A "$SQ/api/authentication/validate" | jq -r .valid)
 rm -f /tmp/cr16-sonar.log
 
 # --- CR3 tasks ------------------------------------------------------------------
-if timeout -k 30 1200 ./gradlew -q analyzeDependencies > /tmp/cr16-dagp.log 2>&1; then
-  pass "analyzeDependencies: $(grep -ciE "^\s*implementation\(?'" /tmp/cr16-dagp.log) advice line(s), e.g. $(grep -m1 -iE "jackson|okhttp|commons|gson|glide|slf4j|constraint" /tmp/cr16-dagp.log | sed 's/^ *//' | cut -c1-90)"
+if timeout -k 30 1200 ./gradlew analyzeDependencies > /tmp/cr16-dagp.log 2>&1; then
+  n=$(grep -ciE "jackson|okhttp|commons-io|commons-compress|gson|glide|slf4j|constraintlayout" /tmp/cr16-dagp.log)
+  if [ "${n:-0}" -gt 0 ]; then pass "analyzeDependencies: $n line(s) name the unused libraries"; else fail "analyzeDependencies: ran, but names none of the unused libraries"; fi
+  sed -n '/== Dependency analysis/,$p' /tmp/cr16-dagp.log | grep -v '^\s*$' | head -n 25 | cut -c1-140 | sed 's/^/      /'
 else
   fail "analyzeDependencies: $(grep -m1 -A3 'What went wrong' /tmp/cr16-dagp.log | tr '\n' ' ' | cut -c1-300)"
 fi

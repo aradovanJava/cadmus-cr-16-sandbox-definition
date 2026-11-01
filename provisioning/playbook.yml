@@ -709,7 +709,7 @@
           - "KVM: {{ cr16_kvm.stdout_lines | select('search', 'KVM acceleration') | join(' ') }}"
           - "Command-line tools: {{ cr16_cmdline.stdout | trim }}"
           - "platform-tools: {{ cr16_ptools.stdout | trim }}"
-          - "SDK: {{ cr16_sdk.stdout_lines | default([]) | join(' | ') }}"
+          - "SDK: {{ (cr16_sdk.stdout_lines | default(['?']) | last).split('\r') | last | trim }}"
           - "MobSF image: {{ cr16_mobsf_pull.stdout | trim }} | backend base: {{ cr16_py_base.stdout | trim }} | Docker MTU {{ cr16_docker_mtu }}"
           - "Project: {{ cr16_clone.stdout | trim }}"
           - "BUILD: {{ cr16_build.stdout_lines | default([]) | join(' | ') }}{{ (' | ' ~ cr16_build.msg) if cr16_build.msg is defined and cr16_build.rc is not defined else '' }}"
@@ -739,7 +739,7 @@
       when: cr16_self_test
 
     - name: Stop the Gradle daemons the provisioning started
-      ansible.builtin.shell: "cd {{ cr16_app_dir }} && timeout -k 10 120 ./gradlew --stop >/dev/null 2>&1; pkill -u {{ cr16_trainee_user }} -f GradleDaemon; true"
+      ansible.builtin.shell: "cd {{ cr16_app_dir }} && timeout -k 10 120 ./gradlew --stop >/dev/null 2>&1; pkill -u {{ cr16_trainee_user }} -f [G]radleDaemon; true"
       become_user: "{{ cr16_trainee_user }}"
       changed_when: false
 

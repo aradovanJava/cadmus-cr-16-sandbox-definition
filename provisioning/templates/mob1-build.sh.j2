@@ -26,7 +26,7 @@ step() {           # step <name> <seconds> <gradle args...>
     grep -m1 -A10 'What went wrong' "$LOG/$name.log" | sed 's/^/    /'
     echo "    last lines of $LOG/$name.log:"
     tail -n 25 "$LOG/$name.log" | sed 's/^/    /'
-    pkill -u "$(id -u)" -f 'GradleDaemon|GradleWorkerMain' 2>/dev/null
+    pkill -u "$(id -u)" -f '[G]radleDaemon|[G]radleWorkerMain' 2>/dev/null
     rc_all=1
   fi
   return $rc
