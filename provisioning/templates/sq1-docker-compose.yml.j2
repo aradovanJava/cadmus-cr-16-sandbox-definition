@@ -33,3 +33,8 @@ volumes:
   sonar_data:
   sonar_logs:
   sonar_extensions:
+
+networks:
+  default:
+    driver_opts:
+      com.docker.network.driver.mtu: "{{ cr16_docker_mtu | default(1500) }}"

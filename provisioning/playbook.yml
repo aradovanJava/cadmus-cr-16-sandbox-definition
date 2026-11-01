@@ -69,10 +69,34 @@
       delay: 20
       until: cr16_apt is succeeded
 
-    - name: Start Docker and enable it at boot
+    # OpenStack networks usually have an MTU below 1500. Containers on Docker's
+    # 1500-byte bridges then lose large packets (TLS to PyPI timed out inside
+    # docker build in allocation 1617). Docker and every compose network use the
+    # host's MTU instead.
+    - name: MTU of the interface that carries the default route
+      ansible.builtin.shell: |
+        dev=$(ip -o route get 1.1.1.1 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p')
+        cat /sys/class/net/${dev:-ens3}/mtu 2>/dev/null || echo 1500
+      args:
+        executable: /bin/bash
+      register: cr16_mtu
+      changed_when: false
+
+    - name: Remember it for Docker and the compose files
+      ansible.builtin.set_fact:
+        cr16_docker_mtu: "{{ [cr16_mtu.stdout | trim | int, 1500] | min if (cr16_mtu.stdout | trim | int) > 576 else 1500 }}"
+
+    - name: Docker bridge MTU = host MTU
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        content: "{{ {'mtu': cr16_docker_mtu | int} | to_nice_json }}\n"
+        mode: "0644"
+      register: cr16_daemon_json
+
+    - name: Start Docker (restart when the MTU changed) and enable it at boot
       ansible.builtin.systemd:
         name: docker
-        state: started
+        state: "{{ 'restarted' if cr16_daemon_json is changed else 'started' }}"
         enabled: true
 
     - name: Let the trainee run docker without sudo
@@ -541,7 +565,7 @@
 
     - name: Build the VulnBank mock backend image from its repository
       ansible.builtin.command: >-
-        docker build --quiet -t cadmus-vulnbank-backend:{{ cr16_backend_ref[:7] }}
+        docker build --quiet --network host -t cadmus-vulnbank-backend:{{ cr16_backend_ref[:7] }}
         {{ cr16_backend_repo }}#{{ cr16_backend_ref }}
       register: cr16_backend_build
       retries: 2
@@ -678,7 +702,7 @@
           - "Command-line tools: {{ cr16_cmdline.stdout | trim }}"
           - "platform-tools: {{ cr16_ptools.stdout | trim }}"
           - "SDK: {{ cr16_sdk.stdout_lines | default([]) | join(' | ') }}"
-          - "MobSF image: {{ cr16_mobsf_pull.stdout | trim }} | backend base: {{ cr16_py_base.stdout | trim }}"
+          - "MobSF image: {{ cr16_mobsf_pull.stdout | trim }} | backend base: {{ cr16_py_base.stdout | trim }} | Docker MTU {{ cr16_docker_mtu }}"
           - "Project: {{ cr16_clone.stdout | trim }}"
           - "BUILD: {{ cr16_build.stdout_lines | default([]) | join(' | ') }}"
           - "APK: {{ cr16_apk.stdout | default('') | trim }}{{ cr16_apk.stderr | default('') }}"

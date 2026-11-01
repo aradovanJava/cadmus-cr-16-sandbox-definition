@@ -28,3 +28,8 @@ services:
 {% endfor %}{% endfor %}
     volumes:
       - /opt/cr16/zap-wrk:/zap/wrk:rw
+
+networks:
+  default:
+    driver_opts:
+      com.docker.network.driver.mtu: "{{ cr16_docker_mtu | default(1500) }}"
