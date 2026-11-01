@@ -1,0 +1,3 @@
+# CADMUS-CR-16 probe - the platform's own account is used; nothing to change.
+probe_user: user
+probe_password: "Password123"

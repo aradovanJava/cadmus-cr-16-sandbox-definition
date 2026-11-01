@@ -1,0 +1,105 @@
+---
+# CADMUS-CR-16 PROBE - read-only checks, never fails the sandbox.
+# Questions answered:
+#   Q1  Does lx1 expose /dev/kvm (nested virtualisation) -> Android emulator OK?
+#   Q2  Can lx1 load binder (redroid, Android in Docker)?
+#   Q3  Does sc1 see virtualisation extensions (Android Emulator + WHPX)?
+
+- name: LX1 - Linux candidate
+  hosts: lx1
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Collect virtualisation facts
+      ansible.builtin.shell: |
+        set +e
+        echo "== identity"
+        . /etc/os-release; echo "$PRETTY_NAME  kernel $(uname -r)"
+        echo "virt: $(systemd-detect-virt 2>&1)"
+        echo "== CPU"
+        lscpu | grep -E 'Model name|Hypervisor vendor|Virtualization|^CPU\(s\)'
+        echo "vmx/svm flags: $(grep -Ec '(vmx|svm)' /proc/cpuinfo)"
+        echo "== /dev/kvm"
+        ls -l /dev/kvm 2>&1
+        echo "nested(intel): $(cat /sys/module/kvm_intel/parameters/nested 2>&1)"
+        echo "nested(amd):   $(cat /sys/module/kvm_amd/parameters/nested 2>&1)"
+        echo "== kvm-ok"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq cpu-checker >/dev/null 2>&1
+        kvm-ok 2>&1
+        echo "== binder (redroid)"
+        grep -c binder /proc/filesystems | sed 's/^/binder in /proc\/filesystems: /'
+        modprobe binder_linux devices=binder,hwbinder,vndbinder 2>&1 | head -2
+        find /lib/modules/$(uname -r) -name 'binder*' 2>/dev/null | head -3
+        grep -E 'CONFIG_ANDROID_BINDER(FS|_IPC)' /boot/config-$(uname -r) 2>&1
+        echo "== resources"
+        free -m | sed -n 2p; df -h / | tail -1; nproc
+      register: lx1_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Save the report for the trainee account
+      ansible.builtin.copy:
+        content: "{{ lx1_probe.stdout }}\n"
+        dest: /home/user/probe-report.txt
+        mode: "0644"
+      failed_when: false
+
+    - name: PROBE RESULT (lx1)
+      ansible.builtin.debug:
+        msg: "{{ lx1_probe.stdout_lines }}"
+
+- name: SC1 - Windows 11
+  hosts: sc1
+  gather_facts: false
+  pre_tasks:
+    - name: Wait until SC1 accepts management connections
+      ansible.builtin.wait_for_connection:
+        delay: 0
+        sleep: 10
+        timeout: 1800
+    - name: Make sure OpenSSH Server exists (the user-access role configures it)
+      ansible.windows.win_shell: |
+        if (Get-Service sshd -ErrorAction SilentlyContinue) { 'present'; exit 0 }
+        Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null
+        Set-Service sshd -StartupType Automatic
+        Start-Service sshd
+        'installed'
+      failed_when: false
+  roles:
+    - role: ansible-role-user-access-windows
+      user_access_username: "{{ probe_user }}"
+      user_access_password: "{{ probe_password }}"
+      user_access_rdp: true
+      user_access_admin: true
+  tasks:
+    - name: Collect virtualisation facts
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Continue'
+        $cs = Get-CimInstance Win32_ComputerSystem
+        $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+        "OS: $((Get-CimInstance Win32_OperatingSystem).Caption) build $((Get-CimInstance Win32_OperatingSystem).BuildNumber)"
+        "Model: $($cs.Manufacturer) / $($cs.Model)"
+        "CPU: $($cpu.Name)"
+        "HypervisorPresent: $($cs.HypervisorPresent)"
+        "VirtualizationFirmwareEnabled: $($cpu.VirtualizationFirmwareEnabled)"
+        "VMMonitorModeExtensions: $($cpu.VMMonitorModeExtensions)"
+        "SecondLevelAddressTranslation: $($cpu.SecondLevelAddressTranslationExtensions)"
+        foreach ($f in 'HypervisorPlatform','Microsoft-Hyper-V-All','VirtualMachinePlatform') {
+          $s = Get-WindowsOptionalFeature -Online -FeatureName $f -ErrorAction SilentlyContinue
+          "Feature ${f}: $($s.State)"
+        }
+        "RAM MB: $([math]::Round($cs.TotalPhysicalMemory/1MB))"
+        "Free disk GB: $([math]::Round((Get-PSDrive C).Free/1GB))"
+      register: sc1_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Save the report
+      ansible.windows.win_copy:
+        content: "{{ sc1_probe.stdout }}"
+        dest: C:\Users\Public\probe-report.txt
+      failed_when: false
+
+    - name: PROBE RESULT (sc1)
+      ansible.builtin.debug:
+        msg: "{{ sc1_probe.stdout_lines }}"

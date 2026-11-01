@@ -1,0 +1,15 @@
+roles:
+  - name: ansible-role-user-access-windows
+    src: https://github.com/andpara/ansible-role-user-access-windows
+    scm: git
+    version: v1.0.0
+  - name: ansible-role-user-access
+    src: https://github.com/cyberrangecz/ansible-role-user-access
+    scm: git
+    version: v1.0.0
+
+collections:
+  - name: ansible.windows
+    version: "3.5.0"
+  - name: chocolatey.chocolatey
+    version: "1.5.1"

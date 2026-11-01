@@ -1,0 +1,66 @@
+# CADMUS-CR-16 · PROBE sandbox (throw-away)
+#
+# Purpose: find out, on cr.cybersecurity-training.cti.gr, whether a guest VM can
+# run an Android emulator with hardware acceleration (nested virtualisation),
+# and whether the Android-in-Docker alternative (redroid, needs binder) is
+# possible on ubuntu-noble. Nothing here is part of the course.
+#
+#   lx1  Linux candidate for the lab workstation (Ubuntu 24.04), SSH
+#   sc1  Windows 11 workstation (framework VM1), SSH-managed as in CR-14
+#
+# The result is printed by the last task of each play ("PROBE RESULT") and is
+# also written to /home/user/probe-report.txt (lx1) and
+# C:\Users\Public\probe-report.txt (sc1).
+
+name: cr-16-probe
+
+hosts:
+  - name: lx1
+    flavor: c4_r8_d60
+    base_box:
+      image: ubuntu-noble-x86_64
+      mgmt_user: ubuntu
+      mgmt_protocol: ssh
+    hidden: false
+
+  - name: sc1
+    flavor: c4_r8_d60
+    base_box:
+      image: windows-11-x86_64
+      mgmt_user: windows
+      mgmt_protocol: ssh
+    hidden: false
+
+routers:
+  - name: router
+    flavor: standard.small
+    base_box:
+      image: debian-12-x86_64
+      mgmt_user: debian
+      mgmt_protocol: ssh
+    hidden: false
+
+networks:
+  - name: dev-lan
+    cidr: 10.10.10.0/24
+    accessible_by_user: true
+    hidden: false
+
+wan:
+  name: internet-connection
+  cidr: 10.10.100.0/24
+
+net_mappings:
+  - host: lx1
+    network: dev-lan
+    ip: 10.10.10.11
+  - host: sc1
+    network: dev-lan
+    ip: 10.10.10.10
+
+router_mappings:
+  - router: router
+    network: dev-lan
+    ip: 10.10.10.1
+
+groups: []
