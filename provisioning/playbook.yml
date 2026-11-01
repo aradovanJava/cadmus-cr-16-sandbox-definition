@@ -163,13 +163,23 @@
     # touched (admin / admin; SonarQube forces the change at first login).
     - name: Switch SonarQube to Standard Experience (the terms the guides use)
       ansible.builtin.shell: |
-        curl -s -o /dev/null -w '%{http_code}' -u admin:admin -X POST \
-          http://127.0.0.1:9000/api/settings/set \
+        S=http://127.0.0.1:9000
+        mode() { curl -s -u admin:admin "$S/api/v2/clean-code-policy/mode" | jq -r '.mode // empty'; }
+        [ "$(mode)" = STANDARD_EXPERIENCE ] && { echo "mode STANDARD_EXPERIENCE (already)"; exit 0; }
+        for ct in application/merge-patch+json application/json; do
+          code=$(curl -s -o /tmp/cr16-mode.out -w '%{http_code}' -u admin:admin -X PATCH \
+                 -H "Content-Type: $ct" "$S/api/v2/clean-code-policy/mode" -d '{"mode":"STANDARD_EXPERIENCE"}')
+          [ "$(mode)" = STANDARD_EXPERIENCE ] && { echo "mode STANDARD_EXPERIENCE (PATCH $ct -> $code)"; exit 0; }
+        done
+        curl -s -o /dev/null -u admin:admin -X POST "$S/api/settings/set" \
           --data-urlencode key=sonar.multi-quality-mode.enabled --data-urlencode value=false
+        m=$(mode)
+        echo "mode ${m:-unknown} (last answer: HTTP $code $(head -c 200 /tmp/cr16-mode.out))"
+        [ "$m" = STANDARD_EXPERIENCE ]
       args:
         executable: /bin/bash
       register: cr16_sq_mode
-      changed_when: cr16_sq_mode.stdout == '204'
+      changed_when: "'already' not in cr16_sq_mode.stdout"
       failed_when: false
       when: cr16_sonarqube_standard_experience
 
@@ -177,7 +187,7 @@
       ansible.builtin.debug:
         msg:
           - "SonarQube image: {{ cr16_sq_pull.stdout | trim }}"
-          - "Standard Experience: {{ 'set' if (cr16_sq_mode.stdout | default('')) == '204' else ('not set (HTTP ' ~ (cr16_sq_mode.stdout | default('skipped')) ~ ')') }}"
+          - "SonarQube {{ cr16_sq_mode.stdout | default('mode: not changed') }}"
 
 # =============================================================================
 #  OWZ1 (VM2) - OWASP ZAP daemon: proxy + API on zap.sandbox.local:8080
