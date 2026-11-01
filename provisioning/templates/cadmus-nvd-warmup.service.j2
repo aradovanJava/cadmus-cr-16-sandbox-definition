@@ -1,0 +1,19 @@
+# CADMUS-CR-16 · MOB1 · one-off download of the NVD data for OWASP
+# Dependency-Check (CR3 D1), started at the end of provisioning.
+# Progress: journalctl -u cadmus-nvd-warmup   or   ~/.cache/cadmus-nvd-warmup.log
+[Unit]
+Description=CADMUS-CR-16 pre-load NVD data for Dependency-Check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={{ cr16_trainee_user }}
+Group={{ cr16_trainee_user }}
+Environment=HOME={{ cr16_home }}
+Environment=ANDROID_HOME={{ cr16_sdk_root }}
+Environment=JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+WorkingDirectory={{ cr16_app_dir }}
+ExecStart=/bin/bash -c 'mkdir -p {{ cr16_home }}/.cache; ./gradlew --no-daemon dependencyCheckUpdate > {{ cr16_home }}/.cache/cadmus-nvd-warmup.log 2>&1; echo "exit $?" >> {{ cr16_home }}/.cache/cadmus-nvd-warmup.log'
+TimeoutStartSec=4h
+Nice=10

@@ -1,0 +1,5 @@
+127.0.0.1       localhost
+::1             ip6-localhost
+{% for h in cr16_lab_hosts %}
+{{ h.ip }}    {{ h.names | join(' ') }}
+{% endfor %}

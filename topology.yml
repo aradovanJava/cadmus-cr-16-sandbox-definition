@@ -1,0 +1,94 @@
+# CADMUS-CR-16 · Secure Coding Mobile (BTCMP-02) · sandbox topology
+#
+# Machines follow section 2.1 "Virtual Machine list" of the CR-16 Cyber Range
+# Training Scenario Framework, with the Android tool chain on a Linux host:
+#
+#   VM1  sc1   Windows 11 workstation - the trainee logs in here over RDP and
+#              works on MOB1 through VS Code Remote-SSH and an SSH shell; the
+#              emulator screen is shown with scrcpy
+#   --   mob1  Ubuntu 24.04 mobile lab host: Android emulator (KVM), SDK,
+#              Gradle, the VulnBank project, MobSF (container MSF1), the
+#              VulnBank mock backend, the course validators in /opt/cadmus
+#   VM2  owz1  OWASP ZAP in Docker (proxy + API)        (DAST)
+#   VM3  sq1   SonarQube Community Build in Docker      (SAST)
+#
+# mob1 uses the flavor/image pair that the CR-16 probe sandbox (definition 64)
+# showed to expose /dev/kvm with nested virtualisation. Image and flavor names
+# are the ones published on cr.cybersecurity-training.cti.gr.
+
+name: cr-16-secure-coding-mobile
+
+hosts:
+  - name: sc1
+    flavor: c4_r8_d60
+    base_box:
+      image: windows-11-x86_64
+      # Managed over SSH: on cr.cybersecurity-training.cti.gr this image never
+      # opens the WinRM listener. First boot takes about five minutes.
+      mgmt_user: windows
+      mgmt_protocol: ssh
+    hidden: false
+
+  - name: mob1
+    flavor: c4_r8_d60
+    base_box:
+      image: ubuntu-noble-x86_64
+      mgmt_user: ubuntu
+      mgmt_protocol: ssh
+    hidden: false
+
+  - name: sq1
+    flavor: c4_r8_d40
+    base_box:
+      image: ubuntu-noble-x86_64
+      mgmt_user: ubuntu
+      mgmt_protocol: ssh
+    hidden: false
+
+  - name: owz1
+    flavor: c4_r8_d40
+    base_box:
+      image: ubuntu-noble-x86_64
+      mgmt_user: ubuntu
+      mgmt_protocol: ssh
+    hidden: false
+
+routers:
+  - name: router
+    flavor: standard.small
+    base_box:
+      image: debian-12-x86_64
+      mgmt_user: debian
+      mgmt_protocol: ssh
+    hidden: false
+
+networks:
+  - name: dev-lan
+    cidr: 10.10.10.0/24
+    accessible_by_user: true
+    hidden: false
+
+wan:
+  name: internet-connection
+  cidr: 10.10.100.0/24
+
+net_mappings:
+  - host: sc1
+    network: dev-lan
+    ip: 10.10.10.10
+  - host: mob1
+    network: dev-lan
+    ip: 10.10.10.11
+  - host: sq1
+    network: dev-lan
+    ip: 10.10.10.20
+  - host: owz1
+    network: dev-lan
+    ip: 10.10.10.30
+
+router_mappings:
+  - router: router
+    network: dev-lan
+    ip: 10.10.10.1
+
+groups: []

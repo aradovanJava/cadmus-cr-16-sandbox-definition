@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# CADMUS-CR-16 · MOB1 · emulator set-up after first boot (provisioning only)
+#
+#  1. wait for sys.boot_completed
+#  2. put the lab names into the emulator's /system/etc/hosts
+#     (vulnbank.local, support.vulnbank.local, zap.sandbox.local, ...): the app's
+#     backend and the ZAP proxy of CR1 A2 are addressed by these names, and
+#     Android does not use the host's /etc/hosts
+#  3. drop back to an unprivileged adbd (am/content/run-as as uid 2000, exactly
+#     what the CR4 scenarios assume) and set test-friendly device settings
+set -u
+export ANDROID_SERIAL={{ cr16_emulator_serial }}
+ADB={{ cr16_sdk_root }}/platform-tools/adb
+
+boot_wait() {
+  local limit=$1 t=0
+  timeout "$limit" "$ADB" wait-for-device || return 1
+  while [ "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != 1 ]; do
+    sleep 5; t=$((t + 5)); [ "$t" -ge "$limit" ] && return 1
+  done
+  return 0
+}
+as_root() { "$ADB" root >/dev/null 2>&1; sleep 4; timeout 120 "$ADB" wait-for-device; }
+as_shell() { "$ADB" unroot >/dev/null 2>&1; sleep 4; timeout 120 "$ADB" wait-for-device; boot_wait 300; }
+
+t0=$(date +%s)
+boot_wait 1800 || { echo "emulator did not finish booting within 30 min"; exit 1; }
+echo "boot: Android $("$ADB" shell getprop ro.build.version.release | tr -d '\r') (API $("$ADB" shell getprop ro.build.version.sdk | tr -d '\r')), $(( $(date +%s) - t0 )) s"
+
+if "$ADB" shell cat /system/etc/hosts 2>/dev/null | grep -q 'vulnbank.local'; then
+  echo "hosts: already present"
+else
+  as_root
+  out=$("$ADB" remount 2>&1 | tr '\n' ' ')
+  echo "remount: $out"
+  if echo "$out" | grep -qiE 'reboot|verity'; then
+    "$ADB" reboot; sleep 15
+    boot_wait 1800 || { echo "no boot after the verity reboot"; exit 1; }
+    as_root
+    out=$("$ADB" remount 2>&1 | tr '\n' ' ')
+    echo "remount (after reboot): $out"
+  fi
+  "$ADB" push /opt/cadmus/emulator-hosts /system/etc/hosts >/dev/null 2>&1
+  "$ADB" shell chmod 644 /system/etc/hosts
+  "$ADB" shell sync
+  as_shell
+fi
+if [ "$("$ADB" shell id -u | tr -d '\r')" != 0 ]; then echo "adbd: unprivileged (uid $("$ADB" shell id -u | tr -d '\r'))"; else as_shell; echo "adbd: switched back to unprivileged"; fi
+
+"$ADB" shell settings put global window_animation_scale 0
+"$ADB" shell settings put global transition_animation_scale 0
+"$ADB" shell settings put global animator_duration_scale 0
+"$ADB" shell settings put secure show_ime_with_hard_keyboard 0
+"$ADB" shell settings put system screen_off_timeout 2147483647
+"$ADB" shell svc power stayon true
+"$ADB" shell locksettings set-disabled true >/dev/null 2>&1
+"$ADB" shell input keyevent KEYCODE_WAKEUP
+"$ADB" shell input keyevent 82
+
+for n in vulnbank.local support.vulnbank.local zap.sandbox.local; do
+  echo "resolve $n: $("$ADB" shell ping -c 1 -W 2 "$n" 2>&1 | head -n 1 | tr -d '\r')"
+done
+"$ADB" shell cat /system/etc/hosts | grep -q 'vulnbank.local'

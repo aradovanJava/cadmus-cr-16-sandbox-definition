@@ -1,0 +1,24 @@
+CADMUS-CR-16 · Secure Coding Mobile · MOB1 (mobile lab host)
+=============================================================
+
+Deliberately vulnerable training software. Stays in this sandbox.
+
+Project            ~/vulnbank   (git, branch main; your branches: cr2-remediation, ...)
+Built APK          /opt/cadmus/vulnbank/app-release.apk   (the artefact CR1 analyses)
+Validators         /opt/cadmus/cr1_validate.py ... cr4_validate.py
+CR4 scenario pack  /opt/cadmus/exploits/run_scenarios.py  (copy it into ~/vulnbank/exploits)
+Session files      ~/cr-session/cr16   (see README.txt there)
+
+Emulator           adb devices   ->  {{ cr16_emulator_serial }} (Android 14, google_apis)
+                   screen: on SC1, desktop shortcut "VulnBank emulator screen"
+                   restart: sudo systemctl restart cadmus-emulator   (boot takes a few minutes)
+Tools              MobSF   http://mobsf.sandbox.local:8000   (container MSF1; web login mobsf / mobsf)
+                   ZAP     http://zap.sandbox.local:{{ cr16_zap_port }}    (proxy + API on OWZ1)
+                   Sonar   http://sonarqube.sandbox.local:9000   (SQ1; admin / admin, change forced)
+Backend            http://vulnbank.local/  http://support.vulnbank.local/help   (container vulnbank-backend)
+                   request log: docker logs -f vulnbank-backend
+
+Environment ($CR_SESSION, $CR_SESSION_DIR, $MOBSF, $ZAP, $SQ, ANDROID_*) comes from
+/etc/profile.d/cadmus-cr16.sh. Dependency-Check's NVD data was pre-loaded in the
+background (journalctl -u cadmus-nvd-warmup); an NVD API key speeds up updates:
+export NVD_API_KEY=...

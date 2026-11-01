@@ -1,0 +1,124 @@
+# CADMUS-CR-16 · Secure Coding Mobile · sandbox variables
+#
+# Everything an instructor is likely to change lives here.
+
+# --- Trainee account (same on every machine) ---------------------------------
+# The platform's networking stage already creates "user" / "Password123"
+# (administrator / sudo) on every user-accessible host, and the platform's
+# remote access uses that account. Never change it here: that would lock the
+# platform's console and remote-desktop access out. Lab-only credential.
+cr16_trainee_user: user
+cr16_trainee_password: "Password123"
+cr16_home: /home/user
+
+# --- Addressing (must match topology.yml) ------------------------------------
+cr16_ip_sc1: 10.10.10.10
+cr16_ip_mob1: 10.10.10.11
+cr16_ip_sq1: 10.10.10.20
+cr16_ip_owz1: 10.10.10.30
+
+# Names used by the CR1-CR4 guides and by the application itself. Every
+# machine (and the emulator, through its /system/etc/hosts) resolves them.
+cr16_lab_hosts:
+  - ip: "{{ cr16_ip_sc1 }}"
+    names: [sc1]
+  - ip: "{{ cr16_ip_mob1 }}"
+    names: [mob1, mobsf.sandbox.local, vulnbank.local, support.vulnbank.local]
+  - ip: "{{ cr16_ip_sq1 }}"
+    names: [sq1, sonarqube.sandbox.local]
+  - ip: "{{ cr16_ip_owz1 }}"
+    names: [owz1, zap.sandbox.local]
+
+# --- Application under test ---------------------------------------------------
+# Participant distribution of VulnBank Mobile: first commit identical to the
+# LMS ZIP, second commit = the documented sandbox build changes. Cloned to
+# ~/vulnbank on MOB1 (the path the CR2-CR4 guides use). Pin a full commit SHA
+# for a course delivery.
+cr16_app_repo: https://github.com/aradovanJava/cadmus-vulnbank-mobile-cr.git
+cr16_app_ref: main
+cr16_app_dir: "{{ cr16_home }}/vulnbank"
+
+# Mock backend (vulnbank.local / support.vulnbank.local, port 80 on MOB1).
+cr16_backend_repo: https://github.com/aradovanJava/cadmus-cr-16-vulnbank-backend.git
+cr16_backend_ref: 2cf94362f30153158c361434e408900279735631
+# Its Dockerfile starts FROM python:3.12-slim. That image is pulled from the
+# ECR Public mirror of the Docker Official Image first (a whole pool pulling
+# anonymously from Docker Hub runs into its rate limit) and tagged locally.
+cr16_backend_base_tag: python:3.12-slim
+cr16_backend_base_images:
+  - public.ecr.aws/docker/library/python:3.12-slim
+  - docker.io/library/python:3.12-slim
+
+# --- Android tool chain on MOB1 -----------------------------------------------
+cr16_sdk_root: /opt/android-sdk
+cr16_cmdline_tools_urls:
+  - https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip
+  - https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+# platform-tools come from the "latest" archives on both MOB1 and SC1, fetched
+# in the same allocation, so the adb server (MOB1) and the adb/scrcpy client
+# (SC1) are the same version.
+cr16_platform_tools_linux_url: https://dl.google.com/android/repository/platform-tools-latest-linux.zip
+cr16_platform_tools_windows_url: https://dl.google.com/android/repository/platform-tools-latest-windows.zip
+cr16_sdk_packages:
+  - "platforms;android-34"
+  - "build-tools;34.0.0"
+  - "build-tools;33.0.1"        # AGP 8.1.0's default build tools
+  - "emulator"
+  - "system-images;android-34;google_apis;x86_64"
+cr16_system_image: "system-images;android-34;google_apis;x86_64"
+cr16_avd_name: cr16
+cr16_avd_device: pixel_6
+cr16_avd_ram_mb: 2048
+cr16_avd_cores: 2
+cr16_avd_data_size: 6G
+cr16_emulator_serial: emulator-5554
+cr16_adb_port: 5037
+
+# Extra swap on MOB1: emulator + Gradle daemon + MobSF share 8 GB of RAM.
+cr16_swap_gb: 6
+
+# --- Containers on MOB1 -------------------------------------------------------
+# MobSF runs as container MSF1 (the name CR1 A1 uses: docker logs MSF1).
+# Tried in order; the first tag that pulls is used.
+cr16_mobsf_images:
+  - opensecurity/mobile-security-framework-mobsf:v4.6.4
+  - opensecurity/mobile-security-framework-mobsf:v4.5.3
+  - opensecurity/mobile-security-framework-mobsf:latest
+
+# --- Analysis tools on SQ1 / OWZ1 ---------------------------------------------
+cr16_sonarqube_images:
+  - public.ecr.aws/docker/library/sonarqube:26.1.0.118079-community
+  - docker.io/library/sonarqube:26.1.0.118079-community
+  - public.ecr.aws/docker/library/sonarqube:25.8.0.111898-community
+  - docker.io/library/sonarqube:25.8.0.111898-community
+# The guides count Vulnerabilities / Bugs / Code Smells / Security Hotspots:
+# the "Standard Experience" view of SonarQube. true switches the instance to it.
+cr16_sonarqube_standard_experience: true
+
+# ZAP runs headless as a daemon: proxy and API on zap.sandbox.local:8080,
+# API key disabled, API reachable from the lab LAN (CR1 A1/A2).
+cr16_zap_image: ghcr.io/zaproxy/zaproxy:stable
+cr16_zap_port: 8080
+
+# --- SC1 (Windows 11) ---------------------------------------------------------
+cr16_choco_packages:
+  - name: git
+  - name: vscode
+cr16_vscode_extensions:
+  - ms-vscode-remote.remote-ssh
+cr16_scrcpy_url: https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-win64-v5.0.1.zip
+
+# --- Behaviour switches ---------------------------------------------------------
+# Self-tests at every allocation, printed as "SELF-TEST ..." lines in the
+# user-ansible log. They clean up after themselves: SonarQube keeps admin/admin
+# and no project, MobSF keeps no scan, ZAP starts with a new session, the app
+# is uninstalled from the emulator and the emulator proxy is unset.
+cr16_self_test: true
+
+# Pre-load the NVD data for OWASP Dependency-Check (CR3 D1) in the background
+# after provisioning (systemd unit cadmus-nvd-warmup on MOB1). Without an NVD
+# API key the first download takes 20-60 minutes.
+cr16_nvd_warmup: true
+
+# Restart SC1 at the very end so the first trainee session sees the final PATH.
+cr16_final_reboot: true

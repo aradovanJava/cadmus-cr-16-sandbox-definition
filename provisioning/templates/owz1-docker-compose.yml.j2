@@ -1,0 +1,30 @@
+# CADMUS-CR-16 · VM2 / OWZ1 · DAST tool (OWASP ZAP, headless daemon)
+# Managed by the sandbox provisioning - edits are lost on re-provisioning.
+#
+#   cd /opt/cr16 && docker compose up -d
+#
+# zap.sandbox.local:{{ cr16_zap_port }} is both the HTTP proxy (CR1 A2: the
+# emulator's global proxy) and the ZAP API (no API key, reachable from the lab
+# LAN). History:  curl -s http://zap.sandbox.local:{{ cr16_zap_port }}/JSON/core/view/urls/
+# In a browser:   http://zap.sandbox.local:{{ cr16_zap_port }}/UI/core/view/messages/
+# Files saved to /zap/wrk appear in /opt/cr16/zap-wrk.
+
+services:
+  zap:
+    image: {{ cr16_zap_image }}
+    container_name: cadmus-zap
+    user: zap
+    restart: unless-stopped
+    command: >-
+      zap.sh -daemon -host 0.0.0.0 -port {{ cr16_zap_port }}
+      -config api.disablekey=true
+      -config api.addrs.addr.name=.*
+      -config api.addrs.addr.regex=true
+    ports:
+      - "{{ cr16_zap_port }}:{{ cr16_zap_port }}"
+    extra_hosts:
+{% for h in cr16_lab_hosts %}{% for n in h.names %}
+      - "{{ n }}:{{ h.ip }}"
+{% endfor %}{% endfor %}
+    volumes:
+      - /opt/cr16/zap-wrk:/zap/wrk:rw

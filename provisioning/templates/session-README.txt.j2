@@ -1,0 +1,43 @@
+CADMUS-CR-16 · Secure Coding Mobile · session folder
+=====================================================
+
+This folder ($CR_SESSION_DIR/$CR_SESSION = {{ cr16_home }}/cr-session/cr16) is
+where the course validators look for the files you produce. Run them with:
+
+    python3 /opt/cadmus/cr1_validate.py --level A1 --session $CR_SESSION
+    python3 /opt/cadmus/cr2_validate.py --session $CR_SESSION --checkpoint all
+    python3 /opt/cadmus/cr3_validate.py --session $CR_SESSION --level D1
+    python3 /opt/cadmus/cr4_validate.py --session $CR_SESSION --level E2
+
+File                     Level   Content
+-----------------------  ------  ---------------------------------------------------
+a1_artefact.json         CR1 A1  {"apk_sha256": "<sha256sum app-release.apk>",
+                                  "version_name": "1.2.0", "version_code": 3}
+mobsf_report.json        CR1 A2  MobSF JSON report:
+                                  curl -X POST -d "hash=$H" -H "Authorization: $MOBSF_KEY" \
+                                       $MOBSF/api/v1/report_json -o mobsf_report.json
+zap_alerts.json          CR1 A2  curl -s $ZAP/JSON/core/view/alerts/ -o zap_alerts.json
+  (or zap_alerts.xml)            curl -s $ZAP/OTHER/core/other/xmlreport/ -o zap_alerts.xml
+a3_counts.json           CR1 A3  {"vulnerabilities": 0, "bugs": 0, "code_smells": 0,
+                                  "security_hotspots": 0, "quality_profile": "Sonar way"}
+                                 (your numbers from the SonarQube dashboard)
+findings.md              CR1 A4  your findings report (cr1_validate.py --level A4
+                                  --session $CR_SESSION --report findings.md)
+cr1_findings.json        CR4 E2  {"findings": [{"id": "VB-CR1-01"}, ...]} - the IDs of
+                                  your CR1 report, so authored scenarios can cite them
+dependency_register.json CR3 D1  the triaged register (CR3_Dependency_Register_Template.md)
+vex.json                 CR3 D3  durable records for carried-forward advisories
+risk_exposure.md         CR3 D3  residual exposure statement (more than 200 characters)
+pipeline_run.json        CR4 E3  record of the complete pipeline run
+evidence_bundle.json     CR4 E3  release digest, SBOM, scenario results
+residual_coverage.md     CR4 E3  what the pipeline cannot detect
+
+Read by the validators from the project instead:
+  ~/vulnbank/app/build/reports/dependency-check-report.json   ./gradlew dependencyCheckAnalyze
+  ~/vulnbank/build/reports/bom.json                           ./gradlew cyclonedxBom
+  ~/vulnbank/gradle/verification-metadata.xml                 ./gradlew --write-verification-metadata sha256,pgp help
+  ~/vulnbank/.github/workflows/security.yml                   CR4 E1
+  ~/vulnbank/exploits/run_scenarios.py                        CR4 E2: cp -r /opt/cadmus/exploits ~/vulnbank/
+
+SonarQube (CR1 A3): export SONAR_TOKEN=<a *user* token of your SonarQube account>;
+the A3 validator reads the project with it (SONAR_ADMIN_TOKEN, if set, wins).

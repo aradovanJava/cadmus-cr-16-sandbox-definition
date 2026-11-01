@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# CADMUS-CR-16 · MOB1 · provisioning self-test (not for trainees)
+#
+# Walks the paths the CR1-CR4 guides rely on, as the trainee account, and
+# prints one PASS/FAIL line each. Everything it creates is removed again:
+# no MobSF scan, no SonarQube project or token (admin / admin unchanged), a new
+# ZAP session, the emulator proxy unset, the app uninstalled, the project tree
+# clean.
+set -u
+. /etc/profile.d/cadmus-cr16.sh
+cd {{ cr16_app_dir }} || { echo "FAIL project: {{ cr16_app_dir }} missing"; exit 1; }
+APK=/opt/cadmus/vulnbank/app-release.apk
+PKG=eu.cadmus.vulnbank
+F=0
+pass() { echo "PASS $*"; }
+fail() { echo "FAIL $*"; F=$((F + 1)); }
+
+# --- build artefact and unit tests (built by the provisioning) ----------------
+if [ -s "$APK" ]; then pass "build: app-release.apk sha256 $(sha256sum "$APK" | cut -c1-16)..."; else fail "build: $APK missing"; fi
+tests=$(cat app/build/test-results/test*UnitTest/TEST-*.xml 2>/dev/null | grep -o 'tests="[0-9]*"' | grep -o '[0-9]*' | awk '{s+=$1} END {print s+0}')
+fails=$(cat app/build/test-results/test*UnitTest/TEST-*.xml 2>/dev/null | grep -oE '(failures|errors)="[0-9]*"' | grep -o '[0-9]*' | awk '{s+=$1} END {print s+0}')
+if [ "${tests:-0}" -gt 0 ] && [ "${fails:-1}" = 0 ]; then pass "tests: ${tests} executed, 0 failed (./gradlew test)"; else fail "tests: executed=${tests:-0} failed=${fails:-?}"; fi
+
+# --- emulator, install, launch ----------------------------------------------
+[ "$(adb shell getprop sys.boot_completed | tr -d '\r')" = 1 ] && pass "emulator: $ANDROID_SERIAL booted" || fail "emulator: not booted"
+r=$(adb install -r "$APK" 2>&1 | tail -n 1)
+[ "$r" = Success ] && pass "install: $r" || fail "install: $r"
+adb shell monkey -p $PKG -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1; sleep 4
+pid=$(adb shell pidof $PKG | tr -d '\r')
+[ -n "$pid" ] && pass "launch: $PKG running (pid $pid)" || fail "launch: $PKG not running"
+
+# --- backend ------------------------------------------------------------------
+code=$(curl -s -o /dev/null -w '%{http_code}' http://vulnbank.local/api/v1/health)
+[ "$code" = 200 ] && pass "backend: http://vulnbank.local/api/v1/health 200" || fail "backend: health $code"
+res=$(adb shell ping -c 1 -W 2 vulnbank.local 2>&1 | head -n 1 | tr -d '\r')
+echo "$res" | grep -q '{{ cr16_ip_mob1 }}' && pass "emulator resolves vulnbank.local ({{ cr16_ip_mob1 }})" || fail "emulator: vulnbank.local -> $res"
+
+# --- ZAP: the CR1 A2 path (proxy on the emulator, use the app by hand) --------
+curl -s "$ZAP/JSON/core/action/newSession/?overwrite=true" >/dev/null
+adb shell settings put global http_proxy zap.sandbox.local:{{ cr16_zap_port }}
+python3 /opt/cadmus/selftest/drive_ui.py | sed 's/^/      /'
+sleep 5
+urls=$(curl -s "$ZAP/JSON/core/view/urls/")
+echo "$urls" | grep -q '/api/v1/login' && pass "zap: history has the login request" || fail "zap: no /login in history"
+echo "$urls" | grep -q '/api/v1/transfer' && pass "zap: history has the transfer request" || fail "zap: no /transfer in history"
+alerts=$(curl -s "$ZAP/JSON/core/view/numberOfAlerts/" | jq -r '.numberOfAlerts // empty')
+echo "      zap alerts (passive): ${alerts:-?}"
+adb shell settings put global http_proxy :0
+curl -s "$ZAP/JSON/core/action/newSession/?overwrite=true" >/dev/null
+
+# --- MobSF: CR1 A1/A2 (key from the container log, upload, scan) -------------
+KEY=$(docker logs MSF1 2>&1 | grep -i 'api key' | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' | awk '{print $NF}')
+[ -n "$KEY" ] && pass "mobsf: API key found in 'docker logs MSF1'" || fail "mobsf: no API key in the container log"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: $KEY" "$MOBSF/api/v1/scans")
+[ "$code" = 200 ] && pass "mobsf: authenticated API call 200" || fail "mobsf: /api/v1/scans $code"
+H=$(curl -s -F "file=@$APK" -H "Authorization: $KEY" "$MOBSF/api/v1/upload" | jq -r '.hash // empty')
+if [ -n "$H" ]; then
+  timeout 1200 curl -s -X POST -d "hash=$H" -H "Authorization: $KEY" "$MOBSF/api/v1/scan" -o /tmp/cr16-mobsf.json
+  if jq -e '.package_name' /tmp/cr16-mobsf.json >/dev/null 2>&1; then
+    pass "mobsf: scan of $(jq -r .package_name /tmp/cr16-mobsf.json) $(jq -r .version_name /tmp/cr16-mobsf.json) complete"
+    echo "      mobsf manifest findings: $(jq -r '[.manifest_analysis.manifest_findings[]?.severity] | group_by(.) | map("\(.[0])=\(length)") | join(" ")' /tmp/cr16-mobsf.json)"
+  else
+    fail "mobsf: scan did not complete ($(head -c 200 /tmp/cr16-mobsf.json))"
+  fi
+  curl -s -X POST -d "hash=$H" -H "Authorization: $KEY" "$MOBSF/api/v1/delete_scan" >/dev/null
+  rm -f /tmp/cr16-mobsf.json
+else
+  fail "mobsf: upload failed"
+fi
+
+# --- SonarQube: CR1 A3 (./gradlew sonar), then remove project and token -------
+A=admin:admin
+curl -s -u $A -X POST "$SQ/api/user_tokens/revoke" --data-urlencode name=cr16-selftest >/dev/null
+TOK=$(curl -s -u $A -X POST "$SQ/api/user_tokens/generate" --data-urlencode name=cr16-selftest \
+      --data-urlencode type=GLOBAL_ANALYSIS_TOKEN | jq -r '.token // empty')
+if [ -n "$TOK" ]; then
+  timeout 1800 ./gradlew -q sonar -Dsonar.projectKey=cadmus-vulnbank -Dsonar.host.url=$SQ -Dsonar.token=$TOK \
+    > /tmp/cr16-sonar.log 2>&1
+  rc=$?
+  st=''
+  for i in $(seq 1 90); do
+    st=$(curl -s -u $A "$SQ/api/ce/component?component=cadmus-vulnbank" | jq -r '.current.status // empty')
+    { [ "$st" = SUCCESS ] || [ "$st" = FAILED ]; } && break; sleep 5
+  done
+  m=$(curl -s -u $A "$SQ/api/measures/component?component=cadmus-vulnbank&metricKeys=vulnerabilities,bugs,code_smells,security_hotspots" \
+      | jq -r '[.component.measures[]? | "\(.metric)=\(.value)"] | join(" ")')
+  if [ "$rc" = 0 ] && [ "$st" = SUCCESS ]; then pass "sonar: ./gradlew sonar analysed ($m)"; else fail "sonar: rc=$rc ce=$st $(grep -m1 -E 'FAILURE|ERROR|What went wrong' -A2 /tmp/cr16-sonar.log | tr '\n' ' ' | cut -c1-300)"; fi
+  echo "      sonar quality profile: $(curl -s -u $A "$SQ/api/qualityprofiles/search?project=cadmus-vulnbank" | jq -r '[.profiles[]? | "\(.language):\(.name)"] | join(" ")')"
+  curl -s -u $A -X POST "$SQ/api/projects/delete" --data-urlencode project=cadmus-vulnbank >/dev/null
+  curl -s -u $A -X POST "$SQ/api/user_tokens/revoke" --data-urlencode name=cr16-selftest >/dev/null
+else
+  fail "sonar: could not create a token with admin/admin (password already changed?)"
+fi
+v=$(curl -s -u $A "$SQ/api/authentication/validate" | jq -r .valid)
+[ "$v" = true ] && pass "sonar: admin/admin unchanged, project removed" || fail "sonar: admin/admin no longer valid"
+rm -f /tmp/cr16-sonar.log
+
+# --- CR3 tasks ------------------------------------------------------------------
+if timeout 1200 ./gradlew -q analyzeDependencies > /tmp/cr16-dagp.log 2>&1; then
+  pass "analyzeDependencies: $(grep -ciE "^\s*implementation\(?'" /tmp/cr16-dagp.log) advice line(s), e.g. $(grep -m1 -iE "jackson|okhttp|commons|gson|glide|slf4j|constraint" /tmp/cr16-dagp.log | sed 's/^ *//' | cut -c1-90)"
+else
+  fail "analyzeDependencies: $(grep -m1 -A3 'What went wrong' /tmp/cr16-dagp.log | tr '\n' ' ' | cut -c1-300)"
+fi
+if timeout 900 ./gradlew -q cyclonedxBom > /tmp/cr16-bom.log 2>&1 && [ -s build/reports/bom.json ]; then
+  pass "cyclonedxBom: build/reports/bom.json, $(jq '.components | length' build/reports/bom.json) components, spec $(jq -r .specVersion build/reports/bom.json)"
+else
+  fail "cyclonedxBom: $(grep -m1 -A3 'What went wrong' /tmp/cr16-bom.log | tr '\n' ' ' | cut -c1-300)"
+fi
+./gradlew -q help --task dependencyCheckAnalyze >/dev/null 2>&1 && pass "dependencyCheckAnalyze: task available" || fail "dependencyCheckAnalyze: task missing"
+rm -f /tmp/cr16-dagp.log /tmp/cr16-bom.log
+
+# --- CR4 harness against the unmodified build: every attack must still work ---
+python3 /opt/cadmus/exploits/run_scenarios.py --json > /tmp/cr16-ex.json 2>/tmp/cr16-ex.err
+ex=$(jq -r '[.results[] | select(.refused == false)] | length' /tmp/cr16-ex.json 2>/dev/null)
+jq -r '.results[] | "      \(.id) \(if .refused then "REFUSED" else "EXPLOITED" end): \(.detail)"' /tmp/cr16-ex.json 2>/dev/null
+[ "$ex" = 6 ] && pass "run_scenarios baseline: 6/6 attacks succeed on the vulnerable build" \
+              || fail "run_scenarios baseline: ${ex:-?}/6 exploited $(tail -n 2 /tmp/cr16-ex.err)"
+rm -f /tmp/cr16-ex.json /tmp/cr16-ex.err
+
+# --- validators run (no traceback) --------------------------------------------
+for v in "cr1_validate.py --level A1 --session selftest" "cr2_validate.py --session selftest --checkpoint CP1 --no-build" \
+         "cr3_validate.py --session selftest --level D3" "cr4_validate.py --session selftest --level E1"; do
+  out=$(timeout 900 python3 /opt/cadmus/$v 2>&1); rc=$?
+  if echo "$out" | grep -q Traceback; then fail "validator ${v%% *}: traceback"; else pass "validator ${v%% *}: runs (exit $rc, expected non-zero on an empty session)"; fi
+done
+
+# --- clean-up: the trainee starts from scratch ----------------------------------
+adb uninstall $PKG >/dev/null 2>&1
+adb shell rm -f /sdcard/cr16-ui.xml
+adb logcat -c
+./gradlew -q clean >/dev/null 2>&1
+n=$(git status --porcelain | wc -l)
+[ "$n" = 0 ] && pass "clean-up: app uninstalled, project tree clean" || fail "clean-up: $n changed path(s) in ~/vulnbank"
+echo "self-test: $F failure(s)"
+exit $F

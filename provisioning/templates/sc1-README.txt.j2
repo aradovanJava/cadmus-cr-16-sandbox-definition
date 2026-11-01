@@ -1,0 +1,24 @@
+CADMUS-CR-16 · Secure Coding Mobile · SC1 (your workstation)
+=============================================================
+
+You work on MOB1, the mobile lab host, from here:
+
+  VulnBank project (VS Code on MOB1)   VS Code Remote-SSH, folder /home/user/vulnbank.
+                                       Terminal > New Terminal opens a shell ON MOB1.
+  MOB1 shell (ssh)                     plain SSH session to MOB1 (key-based login)
+  VulnBank emulator screen             live screen of the Android emulator (scrcpy);
+                                       click and type into it like a phone
+
+Every command in the CR1-CR4 guides (adb, ./gradlew, docker, curl, python3) runs on
+MOB1. Tools, from SC1's browser or MOB1's shell:
+
+  MobSF       http://mobsf.sandbox.local:8000          web login mobsf / mobsf
+  OWASP ZAP   http://zap.sandbox.local:{{ cr16_zap_port }}           proxy + API (no key)
+              history: http://zap.sandbox.local:{{ cr16_zap_port }}/UI/core/view/messages/
+  SonarQube   http://sonarqube.sandbox.local:9000      admin / admin, change forced at first login
+  Backend     http://vulnbank.local/                   VulnBank mock backend (training only)
+
+Account on every machine: user / Password123 (lab-only credential).
+On MOB1: ~/README-CR16.txt, session files in ~/cr-session/cr16.
+
+Deliberately vulnerable training software - nothing leaves this sandbox.

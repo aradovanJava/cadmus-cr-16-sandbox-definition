@@ -1,0 +1,20 @@
+# CADMUS-CR-16 · MOB1 · adb server on all interfaces (managed by provisioning)
+# SC1 shows the emulator with scrcpy against this server:
+#   ADB_SERVER_SOCKET=tcp:{{ cr16_ip_mob1 }}:{{ cr16_adb_port }}  scrcpy --tunnel-host={{ cr16_ip_mob1 }}
+[Unit]
+Description=CADMUS-CR-16 adb server (listens on all interfaces, port {{ cr16_adb_port }})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User={{ cr16_trainee_user }}
+Group={{ cr16_trainee_user }}
+Environment=HOME={{ cr16_home }}
+Environment=ANDROID_HOME={{ cr16_sdk_root }}
+ExecStartPre=-{{ cr16_sdk_root }}/platform-tools/adb kill-server
+ExecStart={{ cr16_sdk_root }}/platform-tools/adb -a -P {{ cr16_adb_port }} nodaemon server start
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

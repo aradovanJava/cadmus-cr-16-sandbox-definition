@@ -1,0 +1,35 @@
+# CADMUS-CR-16 · VM3 / SQ1 · SAST server (SonarQube Community Build)
+# Managed by the sandbox provisioning - edits are lost on re-provisioning.
+#
+#   cd /opt/cr16 && docker compose up -d      # start
+#   docker compose logs -f sonarqube          # follow start-up (1-3 min)
+#
+# http://sonarqube.sandbox.local:9000 - first login admin / admin, then
+# SonarQube forces a new password (CR1 A3). Java/Android is analysed by the
+# built-in Java analyser.
+
+services:
+  sonarqube:
+    image: {{ cr16_sonarqube_image }}
+    container_name: cadmus-sonarqube
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    environment:
+      SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
+    volumes:
+      - sonar_data:/opt/sonarqube/data
+      - sonar_logs:/opt/sonarqube/logs
+      - sonar_extensions:/opt/sonarqube/extensions
+    ulimits:
+      nofile:
+        soft: 131072
+        hard: 131072
+      nproc:
+        soft: 8192
+        hard: 8192
+
+volumes:
+  sonar_data:
+  sonar_logs:
+  sonar_extensions:

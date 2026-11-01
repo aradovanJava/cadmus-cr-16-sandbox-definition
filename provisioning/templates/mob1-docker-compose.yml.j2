@@ -1,0 +1,24 @@
+# CADMUS-CR-16 · MOB1 · MobSF and the VulnBank mock backend
+# Managed by the sandbox provisioning - edits are lost on re-provisioning.
+#
+#   cd /opt/cadmus && docker compose up -d
+#
+#   MSF1              http://mobsf.sandbox.local:8000   (web login mobsf / mobsf;
+#                     REST API key: docker logs MSF1 | grep -i "api key")
+#   vulnbank-backend  http://vulnbank.local/  and  http://support.vulnbank.local/help
+#                     (deliberately vulnerable training server - lab LAN only)
+
+services:
+  mobsf:
+    image: {{ cr16_mobsf_image }}
+    container_name: MSF1
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+
+  backend:
+    image: cadmus-vulnbank-backend:{{ cr16_backend_ref[:7] }}
+    container_name: vulnbank-backend
+    restart: unless-stopped
+    ports:
+      - "80:8080"

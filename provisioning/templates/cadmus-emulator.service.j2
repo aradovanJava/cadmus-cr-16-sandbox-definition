@@ -1,0 +1,25 @@
+# CADMUS-CR-16 · MOB1 · headless Android emulator (managed by provisioning)
+# -writable-system keeps the lab names in the emulator's /system/etc/hosts.
+[Unit]
+Description=CADMUS-CR-16 Android emulator (AVD {{ cr16_avd_name }}, {{ cr16_emulator_serial }})
+After=cadmus-adb.service
+Requires=cadmus-adb.service
+
+[Service]
+User={{ cr16_trainee_user }}
+Group={{ cr16_trainee_user }}
+SupplementaryGroups=kvm
+Environment=HOME={{ cr16_home }}
+Environment=ANDROID_HOME={{ cr16_sdk_root }}
+Environment=ANDROID_SDK_ROOT={{ cr16_sdk_root }}
+Environment=ANDROID_AVD_HOME={{ cr16_home }}/.android/avd
+ExecStart={{ cr16_sdk_root }}/emulator/emulator -avd {{ cr16_avd_name }} -port 5554 \
+  -no-window -no-audio -no-boot-anim -no-snapshot -writable-system \
+  -gpu swiftshader_indirect -accel on \
+  -memory {{ cr16_avd_ram_mb }} -cores {{ cr16_avd_cores }}
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

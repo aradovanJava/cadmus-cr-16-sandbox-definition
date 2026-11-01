@@ -1,0 +1,7 @@
+# CADMUS-CR-16 - MOB1, the mobile lab host (key-based login as {{ cr16_trainee_user }})
+Host mob1
+    HostName {{ cr16_ip_mob1 }}
+    User {{ cr16_trainee_user }}
+    IdentityFile ~/.ssh/id_ed25519_cr16
+    StrictHostKeyChecking accept-new
+    ServerAliveInterval 30

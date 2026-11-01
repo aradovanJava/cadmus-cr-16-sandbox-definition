@@ -1,0 +1,10 @@
+@echo off
+rem CADMUS-CR-16 - show the Android emulator running on MOB1 (scrcpy via MOB1's adb server)
+set ADB=C:\Tools\platform-tools\adb.exe
+set ADB_SERVER_SOCKET=tcp:{{ cr16_ip_mob1 }}:{{ cr16_adb_port }}
+"C:\Tools\scrcpy\scrcpy.exe" --serial={{ cr16_emulator_serial }} --tunnel-host={{ cr16_ip_mob1 }} --no-audio --window-title="VulnBank emulator (MOB1)" %*
+if errorlevel 1 (
+  echo.
+  echo scrcpy could not reach the emulator. On MOB1: adb devices  /  sudo systemctl status cadmus-emulator
+  pause
+)

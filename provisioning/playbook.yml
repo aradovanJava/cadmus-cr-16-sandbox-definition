@@ -1,0 +1,936 @@
+---
+# CADMUS-CR-16 · Secure Coding Mobile (BTCMP-02) · sandbox provisioning
+#
+#   sq1   VM3  SonarQube (SAST) in Docker            Ubuntu 24.04
+#   owz1  VM2  OWASP ZAP (DAST) in Docker, daemon     Ubuntu 24.04
+#   mob1  --   mobile lab host: Android SDK, emulator (KVM), Gradle, the
+#              VulnBank project, MobSF (MSF1), mock backend, validators
+#   sc1   VM1  Windows 11 workstation, RDP: VS Code Remote-SSH to MOB1,
+#              SSH shell, emulator screen (scrcpy)
+#
+# Order: Linux base -> SQ1 -> OWZ1 -> MOB1 -> MOB1 self-test (needs SQ1 and
+# OWZ1) -> SC1 -> SC1 check and restart. All tunables are in
+# group_vars/all.yml.
+
+# =============================================================================
+#  Linux hosts - base system, trainee account, Docker, lab names
+# =============================================================================
+- name: Linux hosts (SQ1, OWZ1, MOB1) - base system, trainee account, Docker
+  hosts:
+    - sq1
+    - owz1
+    - mob1
+  become: true
+
+  pre_tasks:
+    - name: Stop unattended upgrades so they cannot hold the apt lock
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop:
+        - unattended-upgrades
+        - apt-daily.timer
+        - apt-daily-upgrade.timer
+      failed_when: false
+
+    - name: Wait for any apt/dpkg run started at boot to finish
+      ansible.builtin.shell: |
+        for i in $(seq 1 120); do
+          fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/lib/dpkg/lock >/dev/null 2>&1 || exit 0
+          sleep 5
+        done
+      args:
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+
+  roles:
+    - role: ansible-role-user-access
+      user_access_username: "{{ cr16_trainee_user }}"
+      user_access_password: "{{ cr16_trainee_password }}"
+      user_access_sudo: true
+
+  tasks:
+    - name: Install Docker Engine, Compose v2 and the helpers
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - docker-compose-v2
+          - curl
+          - jq
+          - git
+          - unzip
+          - acl          # lets Ansible run tasks as the trainee account
+        state: present
+        update_cache: true
+      register: cr16_apt
+      retries: 3
+      delay: 20
+      until: cr16_apt is succeeded
+
+    - name: Start Docker and enable it at boot
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Let the trainee run docker without sudo
+      ansible.builtin.user:
+        name: "{{ cr16_trainee_user }}"
+        groups: docker
+        append: true
+
+    - name: Resolve the lab machines and the names the guides use
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} CADMUS-CR-16 lab hosts"
+        block: |
+          {% for h in cr16_lab_hosts %}
+          {{ h.ip }} {{ h.names | join(' ') }}
+          {% endfor %}
+
+# =============================================================================
+#  SQ1 (VM3) - SonarQube Community Build
+# =============================================================================
+- name: SQ1 (VM3) - SonarQube Community Build
+  hosts: sq1
+  become: true
+
+  tasks:
+    - name: Kernel settings required by SonarQube's embedded Elasticsearch
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-sonarqube.conf
+        content: |
+          vm.max_map_count=524288
+          fs.file-max=131072
+        mode: "0644"
+      register: cr16_sysctl
+
+    - name: Apply kernel settings
+      ansible.builtin.command: sysctl --system
+      when: cr16_sysctl is changed
+      changed_when: true
+
+    - name: Compose project directory /opt/cr16
+      ansible.builtin.file:
+        path: /opt/cr16
+        state: directory
+        owner: root
+        group: docker
+        mode: "0775"
+
+    - name: Pull SonarQube (first pinned image that answers is used)
+      ansible.builtin.shell: |
+        for img in {{ cr16_sonarqube_images | join(' ') }}; do
+          for attempt in 1 2 3; do
+            if docker pull --quiet "$img" >/dev/null 2>&1; then echo "$img"; exit 0; fi
+            sleep 15
+          done
+        done
+        echo "could not pull any of: {{ cr16_sonarqube_images | join(' ') }}" >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      register: cr16_sq_pull
+      changed_when: false
+
+    - name: Write /opt/cr16/docker-compose.yml
+      ansible.builtin.template:
+        src: sq1-docker-compose.yml.j2
+        dest: /opt/cr16/docker-compose.yml
+        mode: "0644"
+      vars:
+        cr16_sonarqube_image: "{{ cr16_sq_pull.stdout | trim }}"
+
+    - name: Start SonarQube
+      ansible.builtin.command:
+        cmd: docker compose up -d
+        chdir: /opt/cr16
+      changed_when: true
+
+    - name: Wait until SonarQube reports UP (first start takes a few minutes)
+      ansible.builtin.uri:
+        url: http://127.0.0.1:9000/api/system/status
+        return_content: true
+      register: cr16_sq_status
+      until: cr16_sq_status.json is defined and cr16_sq_status.json.status == 'UP'
+      retries: 60
+      delay: 10
+
+    # The guides count Vulnerabilities / Bugs / Code Smells / Security Hotspots,
+    # which is SonarQube's "Standard Experience". The admin password is not
+    # touched (admin / admin; SonarQube forces the change at first login).
+    - name: Switch SonarQube to Standard Experience (the terms the guides use)
+      ansible.builtin.shell: |
+        curl -s -o /dev/null -w '%{http_code}' -u admin:admin -X POST \
+          http://127.0.0.1:9000/api/settings/set \
+          --data-urlencode key=sonar.multi-quality-mode.enabled --data-urlencode value=false
+      args:
+        executable: /bin/bash
+      register: cr16_sq_mode
+      changed_when: cr16_sq_mode.stdout == '204'
+      failed_when: false
+      when: cr16_sonarqube_standard_experience
+
+    - name: Summary (SQ1)
+      ansible.builtin.debug:
+        msg:
+          - "SonarQube image: {{ cr16_sq_pull.stdout | trim }}"
+          - "Standard Experience: {{ 'set' if (cr16_sq_mode.stdout | default('')) == '204' else ('not set (HTTP ' ~ (cr16_sq_mode.stdout | default('skipped')) ~ ')') }}"
+
+# =============================================================================
+#  OWZ1 (VM2) - OWASP ZAP daemon: proxy + API on zap.sandbox.local:8080
+# =============================================================================
+- name: OWZ1 (VM2) - OWASP ZAP
+  hosts: owz1
+  become: true
+
+  tasks:
+    - name: Pull the ZAP image
+      ansible.builtin.command: docker pull --quiet {{ cr16_zap_image }}
+      register: cr16_zap_pull
+      retries: 3
+      delay: 15
+      until: cr16_zap_pull is succeeded
+      changed_when: false
+
+    - name: Compose project directory and ZAP working directory (the container runs as uid 1000)
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "0775"
+      loop:
+        - { path: /opt/cr16, owner: root, group: docker }
+        - { path: /opt/cr16/zap-wrk, owner: "1000", group: "1000" }
+
+    - name: Write /opt/cr16/docker-compose.yml
+      ansible.builtin.template:
+        src: owz1-docker-compose.yml.j2
+        dest: /opt/cr16/docker-compose.yml
+        mode: "0644"
+
+    - name: Start ZAP
+      ansible.builtin.command:
+        cmd: docker compose up -d
+        chdir: /opt/cr16
+      changed_when: true
+
+    - name: Wait for the ZAP API
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ cr16_zap_port }}/JSON/core/view/version/"
+        return_content: true
+      register: cr16_zap_api
+      until: cr16_zap_api is succeeded
+      retries: 40
+      delay: 10
+
+    - name: Summary (OWZ1)
+      ansible.builtin.debug:
+        msg: "ZAP {{ cr16_zap_api.json.version | default('?') }} - proxy and API on zap.sandbox.local:{{ cr16_zap_port }} (no API key)"
+
+# =============================================================================
+#  MOB1 - mobile lab host
+# =============================================================================
+- name: MOB1 - Android SDK, emulator, MobSF, backend, VulnBank project
+  hosts: mob1
+  become: true
+
+  vars:
+    cr16_sdkmanager: "{{ cr16_sdk_root }}/cmdline-tools/latest/bin/sdkmanager"
+    cr16_avdmanager: "{{ cr16_sdk_root }}/cmdline-tools/latest/bin/avdmanager"
+    cr16_as_user_env:
+      HOME: "{{ cr16_home }}"
+      ANDROID_HOME: "{{ cr16_sdk_root }}"
+      ANDROID_SDK_ROOT: "{{ cr16_sdk_root }}"
+      JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+      ANDROID_SERIAL: "{{ cr16_emulator_serial }}"
+
+  tasks:
+    # --- system ------------------------------------------------------------------
+    - name: JDK 17, Python and the libraries the emulator needs
+      ansible.builtin.apt:
+        name:
+          - openjdk-17-jdk-headless
+          - python3
+          - cpu-checker
+          - file
+          - libpulse0
+          - libgl1
+          - libnss3
+          - libxcomposite1
+          - libxcursor1
+          - libxi6
+          - libxtst6
+          - libasound2t64
+          - libxdamage1
+          - libxkbfile1
+          - libxrandr2
+          - libxkbcommon0
+          - libdbus-1-3
+          - libfontconfig1
+        state: present
+      register: cr16_apt_mob1
+      retries: 3
+      delay: 20
+      until: cr16_apt_mob1 is succeeded
+
+    - name: Hardware virtualisation is available (/dev/kvm)
+      ansible.builtin.shell: "ls -l /dev/kvm && kvm-ok"
+      register: cr16_kvm
+      changed_when: false
+      failed_when: cr16_kvm.rc != 0
+
+    - name: /dev/kvm usable by the kvm group
+      ansible.builtin.copy:
+        dest: /etc/udev/rules.d/65-cadmus-kvm.rules
+        content: 'KERNEL=="kvm", GROUP="kvm", MODE="0660"'
+        mode: "0644"
+      register: cr16_kvm_rule
+
+    - name: Apply the udev rule
+      ansible.builtin.shell: udevadm control --reload-rules && udevadm trigger --name-match=kvm
+      when: cr16_kvm_rule is changed
+      changed_when: true
+
+    - name: Trainee in the kvm group
+      ansible.builtin.user:
+        name: "{{ cr16_trainee_user }}"
+        groups: kvm
+        append: true
+
+    - name: Swap file (emulator, Gradle and MobSF share the RAM)
+      ansible.builtin.shell: |
+        set -e
+        if swapon --show=NAME --noheadings | grep -q '^/swap.cadmus$'; then echo present; exit 0; fi
+        fallocate -l {{ cr16_swap_gb }}G /swap.cadmus
+        chmod 600 /swap.cadmus
+        mkswap /swap.cadmus >/dev/null
+        swapon /swap.cadmus
+        grep -q '^/swap.cadmus ' /etc/fstab || echo '/swap.cadmus none swap sw 0 0' >> /etc/fstab
+        echo created
+      args:
+        executable: /bin/bash
+      register: cr16_swap
+      changed_when: "'created' in cr16_swap.stdout"
+
+    # --- Android SDK ---------------------------------------------------------------
+    - name: SDK directory, owned by the trainee (sdkmanager works without sudo)
+      ansible.builtin.file:
+        path: "{{ cr16_sdk_root }}"
+        state: directory
+        owner: "{{ cr16_trainee_user }}"
+        group: "{{ cr16_trainee_user }}"
+        mode: "0755"
+
+    - name: Android command-line tools (first download that works)
+      ansible.builtin.shell: |
+        set -e
+        [ -x {{ cr16_sdkmanager }} ] && { echo present; exit 0; }
+        cd /tmp
+        for u in {{ cr16_cmdline_tools_urls | join(' ') }}; do
+          if curl -fsSL --retry 3 -o cmdline-tools.zip "$u"; then
+            rm -rf /tmp/cmdline-tools {{ cr16_sdk_root }}/cmdline-tools
+            unzip -q cmdline-tools.zip -d /tmp
+            mkdir -p {{ cr16_sdk_root }}/cmdline-tools
+            mv /tmp/cmdline-tools {{ cr16_sdk_root }}/cmdline-tools/latest
+            rm -f cmdline-tools.zip
+            echo "installed from $u"; exit 0
+          fi
+        done
+        echo "could not download the Android command-line tools" >&2; exit 1
+      args:
+        executable: /bin/bash
+      become_user: "{{ cr16_trainee_user }}"
+      register: cr16_cmdline
+      changed_when: "'installed' in cr16_cmdline.stdout"
+
+    - name: platform-tools (latest archive - the same one SC1 gets)
+      ansible.builtin.shell: |
+        set -e
+        cd /tmp
+        curl -fsSL --retry 3 -o platform-tools.zip {{ cr16_platform_tools_linux_url }}
+        rm -rf {{ cr16_sdk_root }}/platform-tools
+        unzip -q platform-tools.zip -d {{ cr16_sdk_root }}
+        rm -f platform-tools.zip
+        {{ cr16_sdk_root }}/platform-tools/adb version | head -n 2 | tr '\n' ' '
+      args:
+        executable: /bin/bash
+      become_user: "{{ cr16_trainee_user }}"
+      register: cr16_ptools
+      changed_when: true
+
+    - name: Accept the SDK licences
+      ansible.builtin.shell: "yes | {{ cr16_sdkmanager }} --licenses >/dev/null 2>&1; true"
+      args:
+        executable: /bin/bash
+      become_user: "{{ cr16_trainee_user }}"
+      environment: "{{ cr16_as_user_env }}"
+      changed_when: false
+
+    - name: SDK packages - platform, build tools, emulator, system image (10-20 min)
+      ansible.builtin.shell: >-
+        {{ cr16_sdkmanager }} --install
+        {% for p in cr16_sdk_packages %}"{{ p }}" {% endfor %}
+        > /tmp/cr16-sdkmanager.log 2>&1;
+        rc=$?; tail -n 3 /tmp/cr16-sdkmanager.log; exit $rc
+      args:
+        executable: /bin/bash
+      become_user: "{{ cr16_trainee_user }}"
+      environment: "{{ cr16_as_user_env }}"
+      register: cr16_sdk
+      retries: 2
+      delay: 30
+      until: cr16_sdk.rc == 0
+      changed_when: true
+
+    - name: Create the AVD
+      ansible.builtin.shell: |
+        set -e
+        if [ -f {{ cr16_home }}/.android/avd/{{ cr16_avd_name }}.avd/config.ini ]; then echo present; exit 0; fi
+        echo no | {{ cr16_avdmanager }} create avd -n {{ cr16_avd_name }} -k "{{ cr16_system_image }}" -d {{ cr16_avd_device }} --force \
+          || echo no | {{ cr16_avdmanager }} create avd -n {{ cr16_avd_name }} -k "{{ cr16_system_image }}" --force
+        echo created
+      args:
+        executable: /bin/bash
+      become_user: "{{ cr16_trainee_user }}"
+      environment: "{{ cr16_as_user_env }}"
+      register: cr16_avd
+      changed_when: "'created' in cr16_avd.stdout"
+
+    - name: AVD settings - hardware keyboard, RAM, cores, data size, no frame
+      ansible.builtin.lineinfile:
+        path: "{{ cr16_home }}/.android/avd/{{ cr16_avd_name }}.avd/config.ini"
+        regexp: "^{{ item.key | regex_escape }}\\s*="
+        line: "{{ item.key }}={{ item.value }}"
+        owner: "{{ cr16_trainee_user }}"
+        group: "{{ cr16_trainee_user }}"
+      loop:
+        - { key: hw.keyboard, value: "yes" }
+        - { key: hw.ramSize, value: "{{ cr16_avd_ram_mb }}" }
+        - { key: hw.cpu.ncore, value: "{{ cr16_avd_cores }}" }
+        - { key: disk.dataPartition.size, value: "{{ cr16_avd_data_size }}" }
+        - { key: hw.gpu.enabled, value: "yes" }
+        - { key: hw.gpu.mode, value: swiftshader_indirect }
+        - { key: showDeviceFrame, value: "no" }
+        - { key: hw.audioInput, value: "no" }
+        - { key: hw.audioOutput, value: "no" }
+      loop_control:
+        label: "{{ item.key }}"
+
+    # --- lab environment, adb server and emulator ---------------------------------
+    - name: Lab environment for every shell (/etc/profile.d/cadmus-cr16.sh)
+      ansible.builtin.template:
+        src: cadmus-cr16.sh.j2
+        dest: /etc/profile.d/cadmus-cr16.sh
+        mode: "0644"
+
+    - name: Load it in interactive non-login shells too (VS Code Remote-SSH terminal)
+      ansible.builtin.blockinfile:
+        path: /etc/bash.bashrc
+        marker: "# {mark} CADMUS-CR-16 environment"
+        block: |
+          [ -r /etc/profile.d/cadmus-cr16.sh ] && . /etc/profile.d/cadmus-cr16.sh
+
+    - name: systemd units - adb server on all interfaces, headless emulator, NVD warm-up
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        mode: "0644"
+      loop:
+        - cadmus-adb.service
+        - cadmus-emulator.service
+        - cadmus-nvd-warmup.service
+
+    - name: Start the adb server and the emulator (it boots while the rest is installed)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+        daemon_reload: true
+      loop:
+        - cadmus-adb.service
+        - cadmus-emulator.service
+
+    # --- /opt/cadmus: validators, CR4 pack, emulator hosts, self-test helpers --------
+    - name: /opt/cadmus folders
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - /opt/cadmus
+        - /opt/cadmus/exploits
+        - /opt/cadmus/vulnbank
+        - /opt/cadmus/selftest
+
+    - name: Course validators (revision 2) and the CR4 scenario pack
+      ansible.builtin.copy:
+        src: "cadmus/{{ item }}"
+        dest: "/opt/cadmus/{{ item }}"
+        mode: "0755"
+      loop:
+        - cr1_validate.py
+        - cr2_validate.py
+        - cr3_validate.py
+        - cr4_validate.py
+        - exploits/run_scenarios.py
+
+    - name: Lab names for the emulator, compose file, self-test helper
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { src: emulator-hosts.j2, dest: /opt/cadmus/emulator-hosts, mode: "0644" }
+        - { src: mob1-device-setup.sh.j2, dest: /opt/cadmus/selftest/device-setup.sh, mode: "0755" }
+        - { src: mob1-selftest.sh.j2, dest: /opt/cadmus/selftest/selftest.sh, mode: "0755" }
+      loop_control:
+        label: "{{ item.dest }}"
+
+    - name: Self-test UI helper
+      ansible.builtin.copy:
+        src: selftest/drive_ui.py
+        dest: /opt/cadmus/selftest/drive_ui.py
+        mode: "0755"
+
+    # --- containers: MobSF (MSF1) and the mock backend --------------------------------
+    - name: Pull MobSF (first tag that answers is used)
+      ansible.builtin.shell: |
+        for img in {{ cr16_mobsf_images | join(' ') }}; do
+          for attempt in 1 2 3; do
+            if docker pull --quiet "$img" >/dev/null 2>&1; then echo "$img"; exit 0; fi
+            sleep 15
+          done
+        done
+        echo "could not pull any of: {{ cr16_mobsf_images | join(' ') }}" >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      register: cr16_mobsf_pull
+      changed_when: false
+
+    - name: Base image of the backend from the ECR mirror, tagged {{ cr16_backend_base_tag }}
+      ansible.builtin.shell: |
+        for img in {{ cr16_backend_base_images | join(' ') }}; do
+          if docker pull --quiet "$img" >/dev/null 2>&1; then
+            docker tag "$img" {{ cr16_backend_base_tag }}; echo "$img"; exit 0
+          fi
+          sleep 10
+        done
+        exit 1
+      args:
+        executable: /bin/bash
+      register: cr16_py_base
+      retries: 2
+      delay: 20
+      until: cr16_py_base.rc == 0
+      changed_when: false
+
+    - name: Build the VulnBank mock backend image from its repository
+      ansible.builtin.command: >-
+        docker build --quiet -t cadmus-vulnbank-backend:{{ cr16_backend_ref[:7] }}
+        {{ cr16_backend_repo }}#{{ cr16_backend_ref }}
+      register: cr16_backend_build
+      retries: 2
+      delay: 20
+      until: cr16_backend_build is succeeded
+      changed_when: true
+
+    - name: Write /opt/cadmus/docker-compose.yml
+      ansible.builtin.template:
+        src: mob1-docker-compose.yml.j2
+        dest: /opt/cadmus/docker-compose.yml
+        mode: "0644"
+      vars:
+        cr16_mobsf_image: "{{ cr16_mobsf_pull.stdout | trim }}"
+
+    - name: Start MSF1 and vulnbank-backend
+      ansible.builtin.command:
+        cmd: docker compose up -d
+        chdir: /opt/cadmus
+      changed_when: true
+
+    # --- the VulnBank project ---------------------------------------------------------
+    - name: Git identity for the trainee's commits (CR2-CR4 branches)
+      ansible.builtin.shell: |
+        git config --global user.name "CR-16 Trainee"
+        git config --global user.email "trainee@sandbox.local"
+        git config --global init.defaultBranch main
+      become_user: "{{ cr16_trainee_user }}"
+      environment: "{{ cr16_as_user_env }}"
+      changed_when: false
+
+    - name: Clone the participant repository to ~/vulnbank
+      ansible.builtin.shell: |
+        set -e
+        if [ -d {{ cr16_app_dir }}/.git ]; then echo present; exit 0; fi
+        git clone -q {{ cr16_app_repo }} {{ cr16_app_dir }}
+        cd {{ cr16_app_dir }}
+        git checkout -q {{ cr16_app_ref }}
+        echo "cloned $(git log -1 --format='%h %s')"
+      args:
+        executable: /bin/bash
+      become_user: "{{ cr16_trainee_user }}"
+      environment: "{{ cr16_as_user_env }}"
+      register: cr16_clone
+      retries: 3
+      delay: 15
+      until: cr16_clone is succeeded
+      changed_when: "'cloned' in cr16_clone.stdout"
+
+    - name: Build the release APK and run the smoke tests (first build downloads Gradle and every dependency)
+      ansible.builtin.shell: |
+        cd {{ cr16_app_dir }}
+        timeout 2400 ./gradlew assembleRelease > /tmp/cr16-build.log 2>&1
+        rc=$?
+        if [ $rc = 0 ]; then echo "assembleRelease: OK"; else echo "assembleRelease: FAILED ($rc)"; grep -m1 -A8 'What went wrong' /tmp/cr16-build.log; fi
+        timeout 1800 ./gradlew test > /tmp/cr16-test.log 2>&1
+        rt=$?
+        if [ $rt = 0 ]; then echo "test: OK"; else echo "test: FAILED ($rt)"; grep -m1 -A8 'What went wrong' /tmp/cr16-test.log; grep -m3 -B1 -A3 'FAILED$' /tmp/cr16-test.log; fi
+        exit $rc
+      args:
+        executable: /bin/bash
+      become_user: "{{ cr16_trainee_user }}"
+      environment: "{{ cr16_as_user_env }}"
+      register: cr16_build
+      changed_when: true
+      failed_when: false
+
+    - name: Ship the built APK as /opt/cadmus/vulnbank/app-release.apk
+      ansible.builtin.shell: |
+        set -e
+        src={{ cr16_app_dir }}/app/build/outputs/apk/release/app-release.apk
+        [ -s "$src" ] || { echo "no APK built"; exit 1; }
+        install -m 0644 "$src" /opt/cadmus/vulnbank/app-release.apk
+        cd /opt/cadmus/vulnbank && sha256sum app-release.apk | tee app-release.apk.sha256
+      args:
+        executable: /bin/bash
+      register: cr16_apk
+      changed_when: true
+      failed_when: false
+
+    # --- emulator ready -----------------------------------------------------------------
+    - name: Emulator - wait for boot, lab names in /system/etc/hosts, device settings
+      ansible.builtin.command: /opt/cadmus/selftest/device-setup.sh
+      become_user: "{{ cr16_trainee_user }}"
+      environment: "{{ cr16_as_user_env }}"
+      register: cr16_device
+      changed_when: true
+      failed_when: false
+
+    # --- trainee files and the SSH key for SC1 ---------------------------------------------
+    - name: Session folder for the validators
+      ansible.builtin.file:
+        path: "{{ cr16_home }}/cr-session/cr16"
+        state: directory
+        owner: "{{ cr16_trainee_user }}"
+        group: "{{ cr16_trainee_user }}"
+        mode: "0755"
+
+    - name: Session README and home README
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: "{{ cr16_trainee_user }}"
+        group: "{{ cr16_trainee_user }}"
+        mode: "0644"
+      loop:
+        - { src: session-README.txt.j2, dest: "{{ cr16_home }}/cr-session/cr16/README.txt" }
+        - { src: mob1-README.txt.j2, dest: "{{ cr16_home }}/README-CR16.txt" }
+      loop_control:
+        label: "{{ item.dest }}"
+
+    - name: Key pair for SC1 -> MOB1 (VS Code Remote-SSH and the SSH shortcut log in without a password)
+      ansible.builtin.shell: |
+        set -e
+        mkdir -p ~/.ssh && chmod 700 ~/.ssh
+        [ -f ~/.ssh/id_ed25519_cr16 ] || ssh-keygen -q -t ed25519 -N '' -C 'cr16 sc1->mob1' -f ~/.ssh/id_ed25519_cr16
+        touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
+        grep -qF "$(cat ~/.ssh/id_ed25519_cr16.pub)" ~/.ssh/authorized_keys || cat ~/.ssh/id_ed25519_cr16.pub >> ~/.ssh/authorized_keys
+      args:
+        executable: /bin/bash
+      become_user: "{{ cr16_trainee_user }}"
+      environment: "{{ cr16_as_user_env }}"
+      changed_when: false
+
+    - name: Read the private key for SC1
+      ansible.builtin.slurp:
+        src: "{{ cr16_home }}/.ssh/id_ed25519_cr16"
+      register: cr16_sc1_key
+
+    - name: Summary (MOB1)
+      ansible.builtin.debug:
+        msg:
+          - "KVM: {{ cr16_kvm.stdout_lines | select('search', 'KVM acceleration') | join(' ') }}"
+          - "Command-line tools: {{ cr16_cmdline.stdout | trim }}"
+          - "platform-tools: {{ cr16_ptools.stdout | trim }}"
+          - "SDK: {{ cr16_sdk.stdout_lines | default([]) | join(' | ') }}"
+          - "MobSF image: {{ cr16_mobsf_pull.stdout | trim }} | backend base: {{ cr16_py_base.stdout | trim }}"
+          - "Project: {{ cr16_clone.stdout | trim }}"
+          - "BUILD: {{ cr16_build.stdout_lines | default([]) | join(' | ') }}"
+          - "APK: {{ cr16_apk.stdout | default('') | trim }}{{ cr16_apk.stderr | default('') }}"
+          - "EMULATOR: {{ cr16_device.stdout_lines | default([]) | join(' | ') }}{{ ' | ' ~ cr16_device.stderr if cr16_device.stderr | default('') else '' }}"
+
+# =============================================================================
+#  MOB1 - self-test (SonarQube and ZAP are up by now)
+# =============================================================================
+- name: MOB1 - self-test of the CR1-CR4 paths
+  hosts: mob1
+  become: true
+
+  tasks:
+    - name: Self-test - build, emulator, backend, ZAP, MobSF, SonarQube, CR3 tasks, CR4 harness (as the trainee)
+      ansible.builtin.shell: /opt/cadmus/selftest/selftest.sh 2>&1
+      args:
+        executable: /bin/bash
+      become_user: "{{ cr16_trainee_user }}"
+      environment:
+        HOME: "{{ cr16_home }}"
+      register: cr16_selftest
+      changed_when: false
+      failed_when: false
+      when: cr16_self_test
+
+    - name: Stop the Gradle daemons the provisioning started
+      ansible.builtin.shell: "cd {{ cr16_app_dir }} && ./gradlew --stop >/dev/null 2>&1; true"
+      become_user: "{{ cr16_trainee_user }}"
+      changed_when: false
+
+    - name: Pre-load the NVD data for Dependency-Check in the background
+      ansible.builtin.systemd:
+        name: cadmus-nvd-warmup.service
+        state: started
+        daemon_reload: true
+        no_block: true
+      when: cr16_nvd_warmup
+
+    - name: SELF-TEST (MOB1)
+      ansible.builtin.debug:
+        msg: "{{ ['SELF-TEST mob1: ' ~ ('skipped' if not cr16_self_test else ('PASS' if cr16_selftest.rc == 0 else 'FAIL'))] + (cr16_selftest.stdout_lines | default([])) }}"
+
+# =============================================================================
+#  SC1 (VM1) - Windows 11 workstation
+# =============================================================================
+- name: SC1 (VM1) - Windows workstation
+  hosts: sc1
+  gather_facts: false
+
+  pre_tasks:
+    - name: Wait until SC1 accepts management connections
+      ansible.builtin.wait_for_connection:
+        delay: 0
+        sleep: 10
+        timeout: 1800
+
+    - name: Make sure OpenSSH Server exists (the user-access role configures it)
+      ansible.windows.win_shell: |
+        if (Get-Service sshd -ErrorAction SilentlyContinue) { 'present'; exit 0 }
+        Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null
+        Set-Service sshd -StartupType Automatic
+        Start-Service sshd
+        'installed'
+      register: cr16_sshd
+      changed_when: "'installed' in cr16_sshd.stdout"
+      failed_when: false
+
+  roles:
+    - role: ansible-role-user-access-windows
+      user_access_username: "{{ cr16_trainee_user }}"
+      user_access_password: "{{ cr16_trainee_password }}"
+      user_access_rdp: true
+      user_access_admin: true
+
+  tasks:
+    - name: Keep the trainee password from expiring during the course
+      ansible.windows.win_user:
+        name: "{{ cr16_trainee_user }}"
+        password_never_expires: true
+
+    - name: Tools folder
+      ansible.windows.win_file:
+        path: C:\Tools
+        state: directory
+
+    - name: Resolve the lab machines and the names the guides use
+      ansible.windows.win_shell: |
+        $hosts = 'C:\Windows\System32\drivers\etc\hosts'
+        $names = @({% for h in cr16_lab_hosts %}{% for n in h.names %}'{{ n }}',{% endfor %}{% endfor %}'') | Where-Object { $_ }
+        $lines = @(Get-Content $hosts -ErrorAction SilentlyContinue | Where-Object {
+          $line = $_; -not ($names | Where-Object { $line -match ('^\s*\S+\s+.*\b' + [regex]::Escape($_) + '\b') }) })
+        {% for h in cr16_lab_hosts %}
+        $lines += '{{ h.ip }} {{ h.names | join(' ') }}'
+        {% endfor %}
+        Set-Content -Path $hosts -Value $lines -Encoding ASCII
+        Clear-DnsClientCache
+      changed_when: false
+
+    - name: Chocolatey packages (Git, VS Code)
+      chocolatey.chocolatey.win_chocolatey:
+        name: "{{ item.name }}"
+        state: present
+      loop: "{{ cr16_choco_packages }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: cr16_choco
+      retries: 3
+      delay: 30
+      until: cr16_choco is succeeded
+
+    - name: platform-tools (adb client - same archive as MOB1) and scrcpy
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        $ProgressPreference = 'SilentlyContinue'
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $tmp = 'C:\Windows\Temp\cr16'
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        Invoke-WebRequest -UseBasicParsing -Uri '{{ cr16_platform_tools_windows_url }}' -OutFile "$tmp\pt.zip"
+        Remove-Item C:\Tools\platform-tools -Recurse -Force -ErrorAction SilentlyContinue
+        Expand-Archive "$tmp\pt.zip" -DestinationPath C:\Tools -Force
+        Invoke-WebRequest -UseBasicParsing -Uri '{{ cr16_scrcpy_url }}' -OutFile "$tmp\scrcpy.zip"
+        Remove-Item "$tmp\scrcpy", C:\Tools\scrcpy -Recurse -Force -ErrorAction SilentlyContinue
+        Expand-Archive "$tmp\scrcpy.zip" -DestinationPath "$tmp\scrcpy" -Force
+        $inner = Get-ChildItem "$tmp\scrcpy" -Directory | Select-Object -First 1
+        Move-Item $inner.FullName C:\Tools\scrcpy
+        Remove-Item "$tmp\pt.zip", "$tmp\scrcpy.zip", "$tmp\scrcpy" -Recurse -Force -ErrorAction SilentlyContinue
+        "adb: $((& C:\Tools\platform-tools\adb.exe version | Select-Object -First 2) -join ' ')"
+        "scrcpy: $((& C:\Tools\scrcpy\scrcpy.exe --version 2>&1 | Select-Object -First 1))"
+      register: cr16_win_tools
+      retries: 2
+      delay: 30
+      until: cr16_win_tools is succeeded
+
+    - name: Emulator screen launcher (scrcpy through MOB1's adb server)
+      ansible.windows.win_template:
+        src: emulator-screen.cmd.j2
+        dest: C:\Tools\emulator-screen.cmd
+
+    - name: SSH key and config for MOB1 in the trainee's profile
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        $ssh = Join-Path $env:USERPROFILE '.ssh'
+        New-Item -ItemType Directory -Force -Path $ssh | Out-Null
+        $key = Join-Path $ssh 'id_ed25519_cr16'
+        $bytes = [Convert]::FromBase64String('{{ hostvars['mob1']['cr16_sc1_key']['content'] }}')
+        $text = [Text.Encoding]::ASCII.GetString($bytes).Replace("`r`n", "`n")
+        [IO.File]::WriteAllText($key, $text)
+        icacls $key /inheritance:r /grant:r "$($env:USERNAME):(R,W)" | Out-Null
+        $cfg = [Text.Encoding]::ASCII.GetString([Convert]::FromBase64String('{{ lookup('ansible.builtin.template', 'sc1-ssh-config.j2') | b64encode }}'))
+        [IO.File]::WriteAllText((Join-Path $ssh 'config'), $cfg.Replace("`r`n", "`n"))
+        Get-ChildItem $ssh | ForEach-Object { $_.Name }
+      become: true
+      become_method: ansible.builtin.runas
+      become_user: "{{ cr16_trainee_user }}"
+      vars:
+        ansible_become_password: "{{ cr16_trainee_password }}"
+      register: cr16_win_ssh
+      changed_when: false
+
+    - name: VS Code Remote-SSH extension and settings
+      ansible.windows.win_shell: |
+        $code = 'C:\Program Files\Microsoft VS Code\bin\code.cmd'
+        if (-not (Test-Path $code)) { throw "VS Code not found at $code" }
+        foreach ($ext in @('{{ cr16_vscode_extensions | join("','") }}')) {
+          & $code --install-extension $ext --force 2>&1 | ForEach-Object { "$_" }
+          if ($LASTEXITCODE -ne 0) { throw "code --install-extension $ext failed with exit code $LASTEXITCODE" }
+        }
+        $settingsDir = Join-Path $env:APPDATA 'Code\User'
+        New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
+        $settings = Join-Path $settingsDir 'settings.json'
+        if (-not (Test-Path $settings)) {
+          @{
+            'remote.SSH.remotePlatform'       = @{ 'mob1' = 'linux' }
+            'remote.SSH.showLoginTerminal'    = $true
+            'security.workspace.trust.enabled' = $false
+            'workbench.startupEditor'         = 'none'
+          } | ConvertTo-Json | Set-Content -Path $settings -Encoding ASCII
+        }
+        & $code --list-extensions
+      become: true
+      become_method: ansible.builtin.runas
+      become_user: "{{ cr16_trainee_user }}"
+      vars:
+        ansible_become_password: "{{ cr16_trainee_password }}"
+      register: cr16_vscode_ext
+      retries: 2
+      delay: 20
+      until: cr16_vscode_ext is succeeded
+      changed_when: false
+      ignore_errors: true
+
+    - name: README on the desktop
+      ansible.windows.win_template:
+        src: sc1-README.txt.j2
+        dest: C:\Users\Public\Desktop\CR-16 Sandbox README.txt
+
+    - name: Browser shortcuts on the desktop
+      ansible.windows.win_copy:
+        dest: 'C:\Users\Public\Desktop\{{ item.name }}.url'
+        content: "[InternetShortcut]\r\nURL={{ item.url }}\r\n"
+      loop:
+        - { name: "MobSF (MOB1)", url: "http://mobsf.sandbox.local:8000/" }
+        - { name: "OWASP ZAP history (OWZ1)", url: "http://zap.sandbox.local:{{ cr16_zap_port }}/UI/core/view/messages/" }
+        - { name: "SonarQube (SQ1)", url: "http://sonarqube.sandbox.local:9000/" }
+
+    - name: Desktop shortcuts - VS Code on MOB1, MOB1 shell, emulator screen
+      ansible.windows.win_shell: |
+        $w = New-Object -ComObject WScript.Shell
+        $s = $w.CreateShortcut('C:\Users\Public\Desktop\VulnBank project (VS Code on MOB1).lnk')
+        $s.TargetPath = 'C:\Program Files\Microsoft VS Code\Code.exe'
+        $s.Arguments  = '--remote ssh-remote+mob1 {{ cr16_app_dir }}'
+        $s.Save()
+        $s = $w.CreateShortcut('C:\Users\Public\Desktop\MOB1 shell (ssh).lnk')
+        $s.TargetPath = 'C:\Windows\System32\OpenSSH\ssh.exe'
+        $s.Arguments  = 'mob1'
+        $s.Save()
+        $s = $w.CreateShortcut('C:\Users\Public\Desktop\VulnBank emulator screen.lnk')
+        $s.TargetPath = 'C:\Tools\emulator-screen.cmd'
+        $s.IconLocation = 'C:\Tools\scrcpy\scrcpy.exe,0'
+        $s.WindowStyle = 7
+        $s.Save()
+      changed_when: false
+
+# =============================================================================
+#  SC1 - check the paths the trainee uses, then restart
+# =============================================================================
+- name: SC1 - self-test and finish
+  hosts: sc1
+  gather_facts: false
+
+  tasks:
+    - name: Self-test - adb through MOB1's server, SSH to MOB1, tool URLs (as the trainee)
+      ansible.windows.win_shell: |
+        $env:ADB_SERVER_SOCKET = 'tcp:{{ cr16_ip_mob1 }}:{{ cr16_adb_port }}'
+        $d = (& C:\Tools\platform-tools\adb.exe devices 2>&1 | Select-String '{{ cr16_emulator_serial }}\s+device') -ne $null
+        if ($d) { 'PASS adb: {{ cr16_emulator_serial }} visible through MOB1''s adb server' } else { "FAIL adb: $((& C:\Tools\platform-tools\adb.exe devices 2>&1) -join ' ')" }
+        $o = & C:\Windows\System32\OpenSSH\ssh.exe -o BatchMode=yes -o ConnectTimeout=15 mob1 'echo ok; ls -d ~/vulnbank' 2>&1
+        if (($o -join ' ') -match 'ok') { "PASS ssh: key login to mob1 ($($o -join ' '))" } else { "FAIL ssh: $($o -join ' ')" }
+        foreach ($u in 'http://mobsf.sandbox.local:8000/login/', 'http://zap.sandbox.local:{{ cr16_zap_port }}/', 'http://sonarqube.sandbox.local:9000/api/system/status', 'http://vulnbank.local/api/v1/health') {
+          try { $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 20 -Uri $u; "PASS http: $u $($r.StatusCode)" }
+          catch { "FAIL http: $u $($_.Exception.Message)" }
+        }
+      become: true
+      become_method: ansible.builtin.runas
+      become_user: "{{ cr16_trainee_user }}"
+      vars:
+        ansible_become_password: "{{ cr16_trainee_password }}"
+      register: cr16_sc1_selftest
+      changed_when: false
+      failed_when: false
+      when: cr16_self_test
+
+    - name: SELF-TEST (SC1) and summary
+      ansible.builtin.debug:
+        msg:
+          - "SELF-TEST sc1: {{ 'skipped' if not cr16_self_test else ('FAIL' if (cr16_sc1_selftest.stdout | default('')) is search('FAIL') or (cr16_sc1_selftest.rc | default(1)) != 0 else 'PASS') }}"
+          - "{{ cr16_sc1_selftest.stdout_lines | default([]) }}"
+          - "Tools: {{ cr16_win_tools.stdout_lines | default([]) | join(' | ') }}"
+          - "VS Code extensions: {{ ('FAILED - ' ~ (cr16_vscode_ext.msg | default('see log'))) if cr16_vscode_ext is failed else (cr16_vscode_ext.stdout_lines | default([]) | select('match', '^ms-') | join(', ')) }}"
+
+    - name: Restart SC1 so the first trainee session starts with the final PATH
+      ansible.windows.win_reboot:
+        reboot_timeout: 1800
+        post_reboot_delay: 30
+      when: cr16_final_reboot

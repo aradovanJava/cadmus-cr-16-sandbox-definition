@@ -1,0 +1,28 @@
+# CADMUS-CR-16 · MOB1 · lab environment (managed by the sandbox provisioning)
+# Sourced by login shells (/etc/profile.d) and by interactive bash (/etc/bash.bashrc),
+# so the VS Code Remote-SSH terminal gets it too.
+export ANDROID_HOME={{ cr16_sdk_root }}
+export ANDROID_SDK_ROOT={{ cr16_sdk_root }}
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+case ":$PATH:" in
+  *":{{ cr16_sdk_root }}/platform-tools:"*) ;;
+  *) export PATH="{{ cr16_sdk_root }}/platform-tools:{{ cr16_sdk_root }}/emulator:{{ cr16_sdk_root }}/cmdline-tools/latest/bin:$PATH" ;;
+esac
+# the one emulator of this sandbox
+export ANDROID_SERIAL={{ cr16_emulator_serial }}
+
+# Course validators (/opt/cadmus/crN_validate.py) and their session files
+export CR_SESSION=cr16
+export CR_SESSION_DIR="$HOME/cr-session"
+export CR2_PROJECT="$HOME/vulnbank"
+export CR2_SRC="$HOME/vulnbank/app/src/main"
+export CR3_PROJECT="$HOME/vulnbank"
+export CR4_PROJECT="$HOME/vulnbank"
+
+# Tool addresses used in the guides
+export MOBSF=http://mobsf.sandbox.local:8000
+export MOBSF_URL=$MOBSF
+export ZAP=http://zap.sandbox.local:{{ cr16_zap_port }}
+export ZAP_URL=$ZAP
+export SQ=http://sonarqube.sandbox.local:9000
+export SONAR_URL=$SQ
